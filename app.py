@@ -23,7 +23,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.5-mobile-product"
+VERSION = "6.5.1-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -152,9 +152,15 @@ Trọng tâm: {focus}
 
 CÁCH CHẤM
 - Chỉ đánh giá AUDIO THỰC TẾ, không suy đoán từ chữ mục tiêu.
-- Chấm âm đầu, vận mẫu, thanh điệu; overall ưu tiên 25% / 30% / 45%.
-- Nếu audio chưa rõ hoặc chưa chắc, phản hồi thận trọng.
-- Luôn ghi nhận một điều học viên làm tốt trước.
+- Chấm âm đầu, vận mẫu, thanh điệu ĐỘC LẬP; overall ưu tiên 25% / 30% / 45%.
+- THANH ĐIỆU là tiêu chí bắt buộc: phải nghe đường nét cao độ thực tế của từng âm tiết và đối chiếu với thanh mục tiêu. Không được cho đúng thanh chỉ vì nhận ra đúng từ/Hanzi.
+- Nếu người học đọc đúng âm đầu và vận mẫu nhưng sai thanh, tone_score PHẢI giảm tương ứng.
+- Nếu sai rõ một thanh (đọc nhầm thanh 1/2/3/4 hoặc thành khinh thanh), tone_score không được cao hơn 6.5.
+- Nếu thanh chưa đủ chuẩn nhưng còn nhận ra hướng thanh, tone_score nên ở khoảng 6.5–8.0, không mặc định 9–10.
+- Với biến điệu/khinh thanh, chấm theo DẠNG ĐỌC THỰC TẾ được yêu cầu trong Pinyin/trọng tâm.
+- Nếu audio chưa rõ hoặc chưa chắc, phản hồi thận trọng; không tự động cho điểm cao.
+- Khen ngợi chỉ là PHONG CÁCH DIỄN ĐẠT, không được làm tăng điểm hoặc che lỗi.
+- Luôn ghi nhận một điều học viên làm tốt trước khi chỉ ra lỗi, NẾU thực sự có điểm làm tốt.
 - Mỗi lượt chỉ chọn MỘT điểm quan trọng nhất để luyện thêm.
 - Ưu tiên đúng trọng tâm của mục luyện.
 - Không dùng lời phán xét nặng.
@@ -199,6 +205,14 @@ Không markdown.
     issue = str(result.get("main_issue") or "").strip()
     if issue.lower() in {"không có","khong co","none","n/a","null","no issue","không"}:
         result["main_issue"] = ""
+    tone = float(result.get("tone_score") or 0)
+    if tone < 8:
+        result["tone_status"] = "Cần luyện" if tone < 6.5 else "Khá"
+        if not str(result.get("main_issue") or "").strip():
+            result["main_issue"] = "Thanh điệu cần chỉnh"
+        fb = str(result.get("feedback") or "").strip()
+        if not any(w in fb.lower() for w in ["thanh", "cao độ", "giọng"]):
+            result["feedback"] = (fb + " " if fb else "") + "Thanh điệu là điểm bạn cần ưu tiên chỉnh ở lượt này."
     return result
 
 
@@ -633,7 +647,7 @@ def home():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Pinyin Master V6.1</title>
+<title>Luyện âm cùng trợ lý Zhou Laoshi</title>
 <style>
 *{box-sizing:border-box}
 :root{--g:#285f4d;--gd:#194839;--gs:#eaf3ef;--light:#f4f8f6;--tx:#20342d;--mu:#7d8c85;--bd:#e1e9e5;--cream:#fff9ec;--red:#a94848}
@@ -673,7 +687,7 @@ button,input{font-family:inherit}.app{max-width:820px;margin:auto;padding:24px 1
 .app{padding:12px 8px 34px}.header{align-items:flex-start;flex-direction:column;gap:12px}.student,.student select{width:100%}
 .card{padding:13px;border-radius:18px;margin-bottom:10px}.cal-top{margin-bottom:8px}.week,.calendar{gap:3px}
 .cell{min-height:58px;padding:5px;border-radius:10px}.date-num{font-size:11px}.day-badge{font-size:8px;margin-top:7px}.lock{top:5px;right:5px;font-size:10px}
-.lesson-title{font-size:22px}.lesson-subtitle{font-size:13px}.item-nav{margin-top:14px;gap:6px}.item-dot{width:32px;height:32px}
+.logo{font-size:23px;line-height:1.18}.brand-sub{font-size:11px;line-height:1.4}.lesson-title{font-size:22px}.lesson-subtitle{font-size:13px}.item-nav{margin-top:14px;gap:6px}.item-dot{width:32px;height:32px}
 .practice{padding:22px 0 2px}.hanzi{font-size:58px}.pinyin{font-size:25px}.actions{grid-template-columns:1fr;gap:8px;margin-top:19px}
 .action{min-height:58px;font-size:15px}.record{font-size:16px}.scores{grid-template-columns:repeat(3,1fr);gap:6px}.score-box{padding:11px 5px}
 .feedback{padding:14px}.next{width:100%;min-height:54px;font-size:16px}.foot{margin-top:10px}
@@ -687,7 +701,7 @@ button,input{font-family:inherit}.app{max-width:820px;margin:auto;padding:24px 1
 <body>
 <div class="app">
 <header class="header">
-<div><div class="logo-small">LÀM CHỦ PHÁT ÂM, TỰ TIN GIAO TIẾP</div><div class="logo">Pinyin Master</div></div>
+<div><div class="logo-small">ZHOU LAOSHI · CÔ VI HÙNG</div><div class="logo">Luyện âm cùng trợ lý Zhou Laoshi</div><div class="brand-sub">Mỗi ngày một chút · Trợ lý nghe và cùng bạn sửa âm</div></div>
 <div class="student"><select id="studentSelect"><option value="">Chọn học viên</option></select></div>
 </header>
 
@@ -1007,7 +1021,10 @@ async function sendAudio(blob,mimeType="audio/webm"){
 
 function showResult(r){
   const score=Number(r.overall_score||0);
-  const level=score>=9?"Rất tốt!":score>=8?"Khá tốt!":score>=6.5?"Thử chỉnh một chút":"Mình luyện lại nhé";
+  const tone=Number(r.tone_score||0);
+  let level=score>=9?"Rất tốt!":score>=8?"Khá tốt!":score>=6.5?"Thử chỉnh một chút":"Mình luyện lại nhé";
+  if(tone<6.5) level="Mình luyện lại thanh điệu nhé";
+  else if(tone<8 && score>=8) level="Thử chỉnh thanh điệu một chút";
   const rawIssue=String(r.main_issue||"").trim();
   const noIssue=["","không có","khong co","none","n/a","null","no issue","không"].includes(rawIssue.toLowerCase());
 
@@ -1028,7 +1045,7 @@ function showResult(r){
     issueBox.innerText=level+" · "+rawIssue;
   }
 
-  document.getElementById("feedbackText").innerText="Zhou Laoshi nhắn bạn: "+(r.feedback||"Phần này bạn đọc khá ổn rồi.");
+  document.getElementById("feedbackText").innerText="Trợ lý của Zhou Laoshi nhắn bạn: "+(r.feedback||"Phần này bạn đọc khá ổn rồi.");
   document.getElementById("encouragement").innerText=r.encouragement||"Giữ cách đọc này và thử thêm một lần nữa nhé!";
 }
 function nextItem(){
