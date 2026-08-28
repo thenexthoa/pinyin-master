@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.6.3-product"
+VERSION = "6.6.4-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -784,7 +784,9 @@ button,input{font-family:inherit}.app{max-width:820px;margin:auto;padding:24px 1
 .scores{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:18px}.score-box{padding:15px 5px;border-radius:15px;background:var(--light);text-align:center}
 .score-value{font-size:24px;font-weight:800;color:var(--gd)}.score-name{margin-top:5px;color:var(--mu);font-size:10px}.score-status{margin-top:4px;color:var(--g);font-size:10px;font-weight:700}
 .feedback{margin-top:12px;padding:17px;border-radius:16px;background:var(--cream);line-height:1.55;font-size:14px}
-.teacher-feedback-wrap{margin:14px 0 4px;display:none}.teacher-feedback-wrap.show{display:block}
+.teacher-feedback-wrap{margin:12px 0 4px;display:none}.teacher-feedback-wrap.show{display:block}
+.teacher-feedback-summary{width:100%;border:1px solid var(--bd);background:#fff;border-radius:14px;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--gd);font-weight:900;cursor:pointer}
+.teacher-feedback-list{display:none;margin-top:8px}.teacher-feedback-list.open{display:block}
 .teacher-feedback-card{padding:16px;border-radius:16px;background:#fff8e8;border:1px solid #ead8a8;margin-bottom:9px}
 .teacher-feedback-head{font-size:12px;font-weight:900;color:var(--gd);letter-spacing:.04em}
 .teacher-feedback-target{margin-top:6px;font-size:15px;font-weight:800}.teacher-feedback-note{margin-top:7px;font-size:14px;line-height:1.55}
@@ -1013,19 +1015,25 @@ async function loadTeacherFeedback(){
     const st=STUDENTS.find(s=>String(s.id)===String(studentSelect.value));
     const learnerName=st?.student_name||"";
     const r=await fetch(`/api/student/teacher-feedback?student_id=${encodeURIComponent(studentSelect.value)}&student_name=${encodeURIComponent(learnerName)}&day_number=${encodeURIComponent(day)}`);
-    const d=await r.json();
+    const raw=await r.text();let d;try{d=JSON.parse(raw)}catch(_){return}
     if(!d.success || !d.feedback?.length)return;
     const seen=new Set();
     const rows=d.feedback.filter(x=>{if(seen.has(x.item_id))return false;seen.add(x.item_id);return true;});
-    wrap.innerHTML=`<div style="font-weight:900;font-size:16px;margin:2px 0 10px">💬 Phản hồi từ Zhou Laoshi</div>`+rows.map(x=>`<div class="teacher-feedback-card">
-      <div class="teacher-feedback-head">🌱 ZHOU LAOSHI GỬI BẠN</div>
-      <div class="teacher-feedback-target">${escMain(x.hanzi||"")} <span style="font-weight:500;color:var(--mu)">${escMain(x.pinyin||"")}</span></div>
+    const retryCount=rows.filter(x=>x.teacher_feedback_status==="retry").length;
+    const extra=retryCount?` · ${retryCount} mục cần luyện lại`:"";
+    const cards=rows.map(x=>`<div class="teacher-feedback-card">
+      <div><strong>${escMain(x.hanzi||"")}</strong> <span style="color:var(--mu)">${escMain(x.pinyin||"")}</span></div>
       ${x.teacher_feedback?`<div class="teacher-feedback-note">${escMain(x.teacher_feedback)}</div>`:""}
       <div class="teacher-feedback-status">${teacherStatusText(x.teacher_feedback_status)}</div>
-      ${x.teacher_feedback_status==="retry"?`<button class="teacher-retry" onclick="retryTeacherItem('${String(x.item_id).replace(/'/g,"")}')">🎙 Luyện lại mục này</button>`:""}
+      ${x.teacher_feedback_status==="retry"?`<button class="teacher-retry" onclick="retryTeacherItem('${String(x.item_id).replace(/'/g,"")}')">🎙 Luyện lại</button>`:""}
     </div>`).join("");
+    wrap.innerHTML=`<button class="teacher-feedback-summary" type="button" onclick="toggleTeacherFeedback()"><span>💬 Zhou Laoshi: ${rows.length} phản hồi${extra}</span><span id="teacherFeedbackArrow">Xem ▾</span></button><div class="teacher-feedback-list" id="teacherFeedbackList">${cards}</div>`;
     wrap.classList.add("show");
   }catch(e){console.warn("Teacher feedback:",e)}
+}
+function toggleTeacherFeedback(){
+ const list=document.getElementById("teacherFeedbackList"),arrow=document.getElementById("teacherFeedbackArrow");
+ if(!list)return;const open=list.classList.toggle("open");if(arrow)arrow.innerText=open?"Thu gọn ▴":"Xem ▾";
 }
 function retryTeacherItem(itemId){
   const items=COURSE[currentDayId]?.items||[];
@@ -1180,8 +1188,13 @@ async function sendAudio(blob,mimeType="audio/webm"){
   f.append("day_id",currentDayId);f.append("item_id",x.id);
   f.append("student_id",studentSelect.value);f.append("student_name",st?st.student_name:"");
   try{
-    const r=await fetch("/api/evaluate",{method:"POST",body:f}),d=await r.json();
-    if(!d.success)throw new Error(d.error||"Không chấm được.");
+    const r=await fetch("/api/evaluate",{method:"POST",body:f});
+    const raw=await r.text(); let d=null;
+    try{d=JSON.parse(raw)}catch(_){
+      if(!r.ok || raw.trim().startsWith("<")) throw new Error("Máy chủ vừa bị gián đoạn. Bản ghi chưa được chấm, bạn bấm đọc lại nhé.");
+      throw new Error("Phản hồi từ máy chủ chưa hợp lệ. Bạn thử lại nhé.");
+    }
+    if(!r.ok || !d.success)throw new Error(d?.error||"Không chấm được.");
     showResult(d.result);markItemDone(currentDayId,x.id,d.result.overall_score);status.innerText="Đã nhận phản hồi";
   }catch(e){status.innerText="Lỗi: "+e.message}
   finally{
