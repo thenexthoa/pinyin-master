@@ -4,6 +4,7 @@
 # Gemini Developer API only
 
 import os
+import time
 import json
 import re
 import uuid
@@ -23,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.5.1-product"
+VERSION = "6.6-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -194,11 +195,25 @@ Chỉ trả JSON:
 }}
 Không markdown.
 """
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[prompt, types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)],
-        config=types.GenerateContentConfig(temperature=0.15, response_mime_type="application/json"),
-    )
+    response = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=[prompt, types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)],
+                config=types.GenerateContentConfig(temperature=0.15, response_mime_type="application/json"),
+            )
+            break
+        except Exception as e:
+            last_error = e
+            msg = str(e).lower()
+            retryable = ("503" in msg or "unavailable" in msg or "high demand" in msg or "429" in msg)
+            if not retryable or attempt == 2:
+                raise
+            time.sleep(1.2 * (attempt + 1))
+    if response is None:
+        raise last_error or RuntimeError("AI temporarily unavailable")
     result = extract_json(response.text)
     for key in ["initial_score", "final_score", "tone_score", "overall_score"]:
         result[key] = score10(result.get(key, 0))
@@ -413,12 +428,40 @@ def api_students():
     except Exception as error:
         return {"success":False,"error":str(error)}
 
+
+@app.get("/api/student/teacher-feedback")
+def student_teacher_feedback(student_id: str, day_number: int):
+    try:
+        if not student_id:
+            return {"success": True, "feedback": []}
+        url=f"{SUPABASE_URL}/rest/v1/submissions"
+        params={
+            "select":"id,item_id,hanzi,pinyin,teacher_feedback,teacher_feedback_status,reviewed_at,created_at",
+            "student_id":f"eq.{student_id}",
+            "day_number":f"eq.{day_number}",
+            "teacher_feedback":"not.is.null",
+            "order":"reviewed_at.desc",
+            "limit":"30",
+        }
+        r=requests.get(url,headers=SUPABASE_HEADERS,params=params,timeout=20)
+        if not r.ok:
+            raise RuntimeError(f"Không đọc được phản hồi giáo viên: {r.status_code} {r.text}")
+        rows=[]
+        for x in r.json():
+            note=str(x.get("teacher_feedback") or "").strip()
+            status=str(x.get("teacher_feedback_status") or "").strip()
+            if note and status in ("good","retry","help","sent"):
+                rows.append(x)
+        return {"success":True,"feedback":rows}
+    except Exception as error:
+        return {"success":False,"error":str(error)}
+
 @app.post("/api/admin/teacher-feedback/{submission_id}")
 async def save_teacher_feedback(submission_id:int,payload:dict):
     try:
         from datetime import datetime, timezone
         status=str(payload.get("teacher_feedback_status") or "draft")
-        if status not in ("draft","sent"): status="draft"
+        if status not in ("draft","sent","good","retry","help"): status="draft"
         body={"teacher_feedback":str(payload.get("teacher_feedback") or "").strip(),
               "teacher_feedback_status":status,
               "reviewed_at":datetime.now(timezone.utc).isoformat()}
@@ -617,6 +660,13 @@ function playAudio(id){
    box.innerHTML='<span class="low">Không phát được audio. Kiểm tra log Python.</span>';
  });
 }
+function feedbackStatusLabel(s){
+ if(s==="good")return "✓ Đã tốt";
+ if(s==="retry")return "↻ Đã gửi · Luyện lại";
+ if(s==="help")return "💬 Đã gửi · Cần cô hỗ trợ";
+ if(s==="sent")return "✓ Đã gửi";
+ return "Nháp";
+}
 async function saveFeedback(id,status){
  const text=document.getElementById("tf-"+id).value,label=document.getElementById("tfs-"+id);label.textContent="Đang lưu...";
  try{const r=await fetch("/api/admin/teacher-feedback/"+id,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({teacher_feedback:text,teacher_feedback_status:status})});
@@ -680,7 +730,14 @@ button,input{font-family:inherit}.app{max-width:820px;margin:auto;padding:24px 1
 .heard{text-align:center;color:var(--mu);font-size:12px;margin-top:16px}.heard strong{display:block;margin-top:4px;color:var(--tx);font-size:19px}
 .scores{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:18px}.score-box{padding:15px 5px;border-radius:15px;background:var(--light);text-align:center}
 .score-value{font-size:24px;font-weight:800;color:var(--gd)}.score-name{margin-top:5px;color:var(--mu);font-size:10px}.score-status{margin-top:4px;color:var(--g);font-size:10px;font-weight:700}
-.feedback{margin-top:12px;padding:17px;border-radius:16px;background:var(--cream);line-height:1.55;font-size:14px}.issue{font-weight:800;margin-bottom:6px}.enc{margin-top:9px;color:var(--g);font-weight:700}
+.feedback{margin-top:12px;padding:17px;border-radius:16px;background:var(--cream);line-height:1.55;font-size:14px}
+.teacher-feedback-wrap{margin:14px 0 4px;display:none}.teacher-feedback-wrap.show{display:block}
+.teacher-feedback-card{padding:16px;border-radius:16px;background:#fff8e8;border:1px solid #ead8a8;margin-bottom:9px}
+.teacher-feedback-head{font-size:12px;font-weight:900;color:var(--gd);letter-spacing:.04em}
+.teacher-feedback-target{margin-top:6px;font-size:15px;font-weight:800}.teacher-feedback-note{margin-top:7px;font-size:14px;line-height:1.55}
+.teacher-feedback-status{margin-top:9px;font-size:12px;font-weight:800;color:var(--g)}
+.teacher-retry{margin-top:10px;border:0;border-radius:12px;padding:10px 14px;background:var(--gs);color:var(--gd);font-weight:800;cursor:pointer}
+.issue{font-weight:800;margin-bottom:6px}.enc{margin-top:9px;color:var(--g);font-weight:700}
 .next-row{text-align:center;margin-top:15px}.next{min-height:46px;padding:0 22px;border:1px solid var(--g);border-radius:13px;background:#fff;color:var(--g);font-weight:700;cursor:pointer}
 .placeholder{text-align:center;padding:35px 10px;color:var(--mu);line-height:1.6}.foot{text-align:center;margin-top:18px;color:#9aa69f;font-size:11px;line-height:1.5}
 @media(max-width:600px){
@@ -692,6 +749,13 @@ button,input{font-family:inherit}.app{max-width:820px;margin:auto;padding:24px 1
 .action{min-height:58px;font-size:15px}.record{font-size:16px}.scores{grid-template-columns:repeat(3,1fr);gap:6px}.score-box{padding:11px 5px}
 .feedback{padding:14px}.next{width:100%;min-height:54px;font-size:16px}.foot{margin-top:10px}
 }
+.calendar-card.collapsed{padding:12px 16px}
+.calendar-card.collapsed .week,.calendar-card.collapsed .calendar{display:none}
+.calendar-card.collapsed .cal-top{margin-bottom:0}
+.calendar-summary{display:none;align-items:center;gap:8px;font-size:13px;font-weight:800;color:var(--gd)}
+.calendar-card.collapsed .calendar-summary{display:flex}
+.calendar-card.collapsed .month-title{display:none}
+.calendar-toggle{margin-left:auto;border:0;background:var(--gs);color:var(--gd);border-radius:999px;padding:8px 12px;font-weight:800;cursor:pointer}
 .complete-panel{margin-top:16px;padding:22px 16px;border-radius:18px;background:var(--gs);text-align:center}
 .complete-icon{font-size:34px}.complete-title{margin-top:7px;font-size:20px;font-weight:800;color:var(--gd)}
 .complete-text{margin-top:5px;color:var(--mu);font-size:13px;line-height:1.5}
@@ -728,7 +792,10 @@ let recorder=null, audioChunks=[], mediaStream=null, sending=false;
 const PROGRESS_KEY="pinyin_master_v61_progress", STUDENT_KEY="pinyin_master_v61_student";
 const studentSelect=document.getElementById("studentSelect");
 let STUDENTS=[];
-studentSelect.addEventListener("change",()=>localStorage.setItem(STUDENT_KEY,studentSelect.value));
+studentSelect.addEventListener("change",()=>{
+ localStorage.setItem(STUDENT_KEY,studentSelect.value);
+ if(currentDayId)loadTeacherFeedback();
+});
 function escMain(s){const d=document.createElement("div");d.textContent=String(s??"");return d.innerHTML}
 async function loadStudents(){
  const r=await fetch("/api/students"),d=await r.json();
@@ -821,6 +888,22 @@ function renderCalendar(){
 
 function moveMonth(delta){viewDate.setMonth(viewDate.getMonth()+delta);renderCalendar()}
 
+function setCalendarCollapsed(collapsed, info=null){
+  const card=document.getElementById("calendarCard");
+  if(!card)return;
+  card.classList.toggle("collapsed",!!collapsed);
+  const btn=card.querySelector(".calendar-toggle");
+  if(btn)btn.innerText=collapsed?"Xem lịch ▾":"Thu gọn";
+  const summary=document.getElementById("calendarSummary");
+  if(summary && info){
+    summary.innerText=`DAY ${info.day} · ${info.dateLabel||""}`;
+  }
+}
+function toggleCalendar(){
+  const card=document.getElementById("calendarCard");
+  if(!card)return;
+  setCalendarCollapsed(!card.classList.contains("collapsed"));
+}
 function openDay(dayId){
   if(!COURSE[dayId])return;
   currentDayId=dayId;currentItemIndex=0;
@@ -835,6 +918,7 @@ function renderLesson(){
     <div class="lesson-title">${l.title}</div>
     <div class="lesson-subtitle">${l.subtitle||""}</div>
     <div class="item-nav" id="itemNav"></div>
+    <div class="teacher-feedback-wrap" id="teacherFeedbackWrap"></div>
     <div class="practice">
       <div class="focus" id="focus"></div>
       <div class="hanzi" id="hanzi"></div>
@@ -858,9 +942,41 @@ function renderLesson(){
       <div class="feedback"><div class="issue" id="mainIssue"></div><div id="feedbackText"></div><div class="enc" id="encouragement"></div></div>
       <div class="next-row"><button class="next" id="nextButton" onclick="nextItem()">Tiếp tục →</button></div>
     </div>`;
-  renderItemNav();renderCurrentItem();
+  renderItemNav();renderCurrentItem();loadTeacherFeedback();
 }
 
+function teacherStatusText(s){
+  if(s==="good")return "✓ Cô ghi nhận: Đã tốt";
+  if(s==="retry")return "↻ Cô muốn bạn luyện lại";
+  if(s==="help")return "💬 Cô sẽ hỗ trợ thêm";
+  return "✓ Zhou Laoshi đã phản hồi";
+}
+async function loadTeacherFeedback(){
+  const wrap=document.getElementById("teacherFeedbackWrap");
+  if(!wrap || !currentDayId || !studentSelect.value)return;
+  wrap.classList.remove("show");wrap.innerHTML="";
+  try{
+    const day=COURSE[currentDayId]?.day;
+    const r=await fetch(`/api/student/teacher-feedback?student_id=${encodeURIComponent(studentSelect.value)}&day_number=${encodeURIComponent(day)}`);
+    const d=await r.json();
+    if(!d.success || !d.feedback?.length)return;
+    const seen=new Set();
+    const rows=d.feedback.filter(x=>{if(seen.has(x.item_id))return false;seen.add(x.item_id);return true;});
+    wrap.innerHTML=rows.map(x=>`<div class="teacher-feedback-card">
+      <div class="teacher-feedback-head">🌱 ZHOU LAOSHI GỬI BẠN</div>
+      <div class="teacher-feedback-target">${escMain(x.hanzi||"")} <span style="font-weight:500;color:var(--mu)">${escMain(x.pinyin||"")}</span></div>
+      <div class="teacher-feedback-note">${escMain(x.teacher_feedback||"")}</div>
+      <div class="teacher-feedback-status">${teacherStatusText(x.teacher_feedback_status)}</div>
+      ${x.teacher_feedback_status==="retry"?`<button class="teacher-retry" onclick="retryTeacherItem('${String(x.item_id).replace(/'/g,"")}')">🎙 Luyện lại mục này</button>`:""}
+    </div>`).join("");
+    wrap.classList.add("show");
+  }catch(e){console.warn("Teacher feedback:",e)}
+}
+function retryTeacherItem(itemId){
+  const items=COURSE[currentDayId]?.items||[];
+  const i=items.findIndex(x=>String(x.id)===String(itemId));
+  if(i>=0){currentItemIndex=i;renderItemNav();renderCurrentItem();document.querySelector(".practice")?.scrollIntoView({behavior:"smooth",block:"start"});}
+}
 function currentItem(){return COURSE[currentDayId].items[currentItemIndex]}
 
 function renderItemNav(){
