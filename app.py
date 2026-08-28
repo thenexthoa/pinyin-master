@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.6.2-product"
+VERSION = "6.6.3-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -454,27 +454,35 @@ def api_students():
 
 
 @app.get("/api/student/teacher-feedback")
-def student_teacher_feedback(student_id: str, day_number: int):
+def student_teacher_feedback(student_id: str = "", student_name: str = "", day_number: int = 0):
     try:
-        if not student_id:
+        if not student_id and not student_name:
             return {"success": True, "feedback": []}
         url=f"{SUPABASE_URL}/rest/v1/submissions"
         params={
-            "select":"id,item_id,hanzi,pinyin,teacher_feedback,teacher_feedback_status,reviewed_at,created_at",
-            "student_id":f"eq.{student_id}",
-            "day_number":f"eq.{day_number}",
-            "teacher_feedback":"not.is.null",
-            "order":"reviewed_at.desc",
-            "limit":"30",
+            "select":"id,item_id,hanzi,pinyin,teacher_feedback,teacher_feedback_status,reviewed_at,created_at,student_id,student_name",
+            "day_number":f"eq.{int(day_number)}",
+            "order":"reviewed_at.desc.nullslast,created_at.desc",
+            "limit":"100",
         }
+        # New attempts use students.id. Older attempts may have a different/blank student_id,
+        # so learner name is a safe compatibility fallback.
+        if student_id and student_name:
+            safe_name=str(student_name).replace(",", " ").replace("(", " ").replace(")", " ").strip()
+            params["or"]=f"(student_id.eq.{student_id},student_name.eq.{safe_name})"
+        elif student_id:
+            params["student_id"]=f"eq.{student_id}"
+        else:
+            params["student_name"]=f"eq.{student_name}"
+
         r=requests.get(url,headers=SUPABASE_HEADERS,params=params,timeout=20)
         if not r.ok:
             raise RuntimeError(f"Không đọc được phản hồi giáo viên: {r.status_code} {r.text}")
         rows=[]
         for x in r.json():
-            note=str(x.get("teacher_feedback") or "").strip()
             status=str(x.get("teacher_feedback_status") or "").strip()
-            if note and status in ("good","retry","help","sent"):
+            # A status itself is teacher feedback; written note is optional.
+            if status in ("good","retry","help","sent"):
                 rows.append(x)
         return {"success":True,"feedback":rows}
     except Exception as error:
@@ -1002,15 +1010,17 @@ async function loadTeacherFeedback(){
   wrap.classList.remove("show");wrap.innerHTML="";
   try{
     const day=COURSE[currentDayId]?.day;
-    const r=await fetch(`/api/student/teacher-feedback?student_id=${encodeURIComponent(studentSelect.value)}&day_number=${encodeURIComponent(day)}`);
+    const st=STUDENTS.find(s=>String(s.id)===String(studentSelect.value));
+    const learnerName=st?.student_name||"";
+    const r=await fetch(`/api/student/teacher-feedback?student_id=${encodeURIComponent(studentSelect.value)}&student_name=${encodeURIComponent(learnerName)}&day_number=${encodeURIComponent(day)}`);
     const d=await r.json();
     if(!d.success || !d.feedback?.length)return;
     const seen=new Set();
     const rows=d.feedback.filter(x=>{if(seen.has(x.item_id))return false;seen.add(x.item_id);return true;});
-    wrap.innerHTML=rows.map(x=>`<div class="teacher-feedback-card">
+    wrap.innerHTML=`<div style="font-weight:900;font-size:16px;margin:2px 0 10px">💬 Phản hồi từ Zhou Laoshi</div>`+rows.map(x=>`<div class="teacher-feedback-card">
       <div class="teacher-feedback-head">🌱 ZHOU LAOSHI GỬI BẠN</div>
       <div class="teacher-feedback-target">${escMain(x.hanzi||"")} <span style="font-weight:500;color:var(--mu)">${escMain(x.pinyin||"")}</span></div>
-      <div class="teacher-feedback-note">${escMain(x.teacher_feedback||"")}</div>
+      ${x.teacher_feedback?`<div class="teacher-feedback-note">${escMain(x.teacher_feedback)}</div>`:""}
       <div class="teacher-feedback-status">${teacherStatusText(x.teacher_feedback_status)}</div>
       ${x.teacher_feedback_status==="retry"?`<button class="teacher-retry" onclick="retryTeacherItem('${String(x.item_id).replace(/'/g,"")}')">🎙 Luyện lại mục này</button>`:""}
     </div>`).join("");
