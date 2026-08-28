@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.6-product"
+VERSION = "6.6.1-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -647,8 +647,13 @@ function render(){
    <td id="audio-${x.id}"><button class="listen" onclick="playAudio(${x.id})">▶ Nghe</button></td>
    <td class="detail"><strong>${esc(x.main_issue||"")}</strong><br>${esc(x.feedback||"")}</td>
    <td class="detail"><textarea id="tf-${x.id}" style="width:250px;min-height:72px;border:1px solid #e1e9e5;border-radius:10px;padding:8px">${esc(x.teacher_feedback||"")}</textarea>
-   <div style="display:flex;gap:6px;margin-top:6px"><button onclick="saveFeedback(${x.id},'draft')">Lưu nháp</button><button class="refresh" onclick="saveFeedback(${x.id},'sent')">Gửi học viên</button></div>
-   <div class="muted" id="tfs-${x.id}">${x.teacher_feedback_status==="sent"?"✓ Đã gửi":"Nháp"}</div></td></tr>`}).join("")
+   <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+     <button onclick="saveFeedback(${x.id},'draft')">Lưu nháp</button>
+     <button class="refresh" onclick="saveFeedback(${x.id},'good')">✓ Đã tốt</button>
+     <button onclick="saveFeedback(${x.id},'retry')">↻ Luyện lại</button>
+     <button onclick="saveFeedback(${x.id},'help')">💬 Cần cô hỗ trợ</button>
+   </div>
+   <div class="muted" id="tfs-${x.id}">${feedbackStatusLabel(x.teacher_feedback_status)}</div></td></tr>`}).join("")
    :'<tr><td colspan="9" class="empty">Chưa có dữ liệu phù hợp.</td></tr>';
 }
 function playAudio(id){
@@ -670,7 +675,7 @@ function feedbackStatusLabel(s){
 async function saveFeedback(id,status){
  const text=document.getElementById("tf-"+id).value,label=document.getElementById("tfs-"+id);label.textContent="Đang lưu...";
  try{const r=await fetch("/api/admin/teacher-feedback/"+id,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({teacher_feedback:text,teacher_feedback_status:status})});
- const d=await r.json();if(!d.success)throw Error(d.error);label.textContent=status==="sent"?"✓ Đã gửi học viên":"Đã lưu nháp";
+ const d=await r.json();if(!d.success)throw Error(d.error);label.textContent=status==="draft"?"Đã lưu nháp":feedbackStatusLabel(status);
  const row=DATA.find(x=>x.id===id);if(row){row.teacher_feedback=text;row.teacher_feedback_status=status}}
  catch(e){label.textContent="Lỗi: "+e.message}
 }
