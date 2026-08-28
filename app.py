@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.6.1-product"
+VERSION = "6.6.2-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -299,18 +299,42 @@ def insert_submission(student_name, student_id, lesson, item, audio_path, result
     rows = response.json()
     return rows[0] if rows else payload
 
-def list_submissions(limit=300):
-    limit = max(1, min(int(limit), 1000))
+def list_submissions(limit=100, offset=0, q="", day_number=None, score_filter=""):
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
     url = f"{SUPABASE_URL}/rest/v1/submissions"
     params = {
         "select": "*",
         "order": "created_at.desc",
         "limit": str(limit),
+        "offset": str(offset),
     }
-    response = requests.get(url, headers=SUPABASE_HEADERS, params=params, timeout=30)
+    if day_number not in (None, ""):
+        params["day_number"] = f"eq.{int(day_number)}"
+    if score_filter == "low":
+        params["overall_score"] = "lt.7"
+    elif score_filter == "tone":
+        params["tone_score"] = "lt.7"
+    q = str(q or "").strip()
+    if q:
+        # Search the whole database, not only the currently loaded page.
+        safe = q.replace(",", " ").replace("(", " ").replace(")", " ").strip()
+        params["or"] = f"(student_name.ilike.*{safe}*,hanzi.ilike.*{safe}*,pinyin.ilike.*{safe}*,heard_pinyin.ilike.*{safe}*)"
+    headers = dict(SUPABASE_HEADERS)
+    headers["Prefer"] = "count=exact"
+    response = requests.get(url, headers=headers, params=params, timeout=30)
     if not response.ok:
         raise RuntimeError(f"Không đọc được submissions: {response.status_code} {response.text}")
-    return response.json()
+    total = None
+    content_range = response.headers.get("content-range", "")
+    if "/" in content_range:
+        try:
+            total = int(content_range.rsplit("/", 1)[1])
+        except Exception:
+            pass
+    rows = response.json()
+    return rows, (total if total is not None else len(rows))
+
 
 def create_signed_audio_url(audio_path, expires_in=3600):
     url = f"{SUPABASE_URL}/storage/v1/object/sign/{AUDIO_BUCKET}/{audio_path}"
@@ -504,9 +528,10 @@ def export_admin_csv():
         return Response(content=str(error),status_code=500,media_type="text/plain")
 
 @app.get("/api/admin/submissions")
-def admin_submissions(limit: int = 300):
+def admin_submissions(limit: int = 100, offset: int = 0, q: str = "", day_number: str = "", score_filter: str = ""):
     try:
-        return {"success": True, "submissions": list_submissions(limit)}
+        rows, total = list_submissions(limit, offset, q, day_number, score_filter)
+        return {"success": True, "submissions": rows, "total": total, "limit": limit, "offset": offset}
     except Exception as error:
         return {"success": False, "error": str(error)}
 
@@ -610,34 +635,49 @@ audio{width:240px;height:34px}.date{white-space:nowrap;font-size:11px;color:#7d8
 <button class="refresh" onclick="loadData()">↻ Làm mới</button><button onclick="window.location.href='/api/admin/export.csv'">↓ Xuất Google Sheet</button>
 </div>
 <div class="summary" id="summary"></div>
-<div class="tablewrap"><table><thead><tr><th>THỜI GIAN</th><th>HỌC VIÊN</th><th>DAY</th><th>TỪ</th><th>AI NGHE</th><th>ĐIỂM</th><th>AUDIO</th><th>FEEDBACK AI</th><th>GV NHẬN XÉT</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="tablewrap"><table><thead><tr><th>THỜI GIAN</th><th>HỌC VIÊN</th><th>DAY</th><th>TỪ</th><th>AI NGHE</th><th>ĐIỂM</th><th>AUDIO</th><th>FEEDBACK AI</th><th>GV NHẬN XÉT</th></tr></thead><tbody id="rows"></tbody></table></div><div id="pager" style="display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:14px 4px"></div>
 </div></div>
 <script>
-let DATA=[];
+let DATA=[],TOTAL=0,OFFSET=0,LIMIT=100,SEARCH_TIMER=null;
 function esc(s){
  const div=document.createElement("div");
  div.textContent=String(s??"");
  return div.innerHTML;
 }
 function fmtDate(v){if(!v)return "";let d=new Date(v);return d.toLocaleString("vi-VN")}
-async function loadData(){
+async function loadData(reset=false){
+ if(reset)OFFSET=0;
  document.getElementById("rows").innerHTML='<tr><td colspan="9" class="empty">Đang tải...</td></tr>';
- try{let r=await fetch("/api/admin/submissions?limit=500"),d=await r.json();if(!d.success)throw Error(d.error);DATA=d.submissions||[];fillDays();render()}
- catch(e){document.getElementById("rows").innerHTML=`<tr><td colspan="9" class="empty">Lỗi: ${esc(e.message)}</td></tr>`}
+ const q=document.getElementById("q").value.trim();
+ const day=document.getElementById("day").value;
+ const sf=document.getElementById("scoreFilter").value;
+ const qs=new URLSearchParams({limit:String(LIMIT),offset:String(OFFSET)});
+ if(q)qs.set("q",q);
+ if(day)qs.set("day_number",day);
+ if(sf)qs.set("score_filter",sf);
+ try{
+   let r=await fetch("/api/admin/submissions?"+qs.toString()),d=await r.json();
+   if(!d.success)throw Error(d.error);
+   DATA=d.submissions||[];TOTAL=Number(d.total||0);render();renderPager();
+ }catch(e){document.getElementById("rows").innerHTML=`<tr><td colspan="9" class="empty">Lỗi: ${esc(e.message)}</td></tr>`}
 }
-function fillDays(){let s=document.getElementById("day"),cur=s.value,days=[...new Set(DATA.map(x=>x.day_number))].sort((a,b)=>a-b);s.innerHTML='<option value="">Tất cả Day</option>'+days.map(x=>`<option value="${x}">Day ${x}</option>`).join("");s.value=cur}
-function filtered(){
- let q=document.getElementById("q").value.trim().toLowerCase(),day=document.getElementById("day").value,sf=document.getElementById("scoreFilter").value;
- return DATA.filter(x=>{
-   if(q && !`${x.student_name} ${x.hanzi} ${x.pinyin} ${x.heard_pinyin||""}`.toLowerCase().includes(q))return false;
-   if(day && String(x.day_number)!==day)return false;
-   if(sf==="low" && Number(x.overall_score)>=7)return false;
-   if(sf==="tone" && Number(x.tone_score)>=7)return false;
-   return true;
- });
+function fillDays(){
+ let s=document.getElementById("day"),cur=s.value;
+ s.innerHTML='<option value="">Tất cả Day</option>'+Array.from({length:32},(_,i)=>`<option value="${i+1}">Day ${i+1}</option>`).join("");
+ s.value=cur;
 }
+function renderPager(){
+ let box=document.getElementById("pager");
+ if(!box)return;
+ const from=TOTAL?OFFSET+1:0,to=Math.min(OFFSET+DATA.length,TOTAL);
+ box.innerHTML=`<span class="muted">${from}–${to} / ${TOTAL}</span>
+ <button ${OFFSET<=0?"disabled":""} onclick="prevPage()">← Trước</button>
+ <button ${OFFSET+LIMIT>=TOTAL?"disabled":""} onclick="nextPage()">Sau →</button>`;
+}
+function prevPage(){OFFSET=Math.max(0,OFFSET-LIMIT);loadData(false)}
+function nextPage(){if(OFFSET+LIMIT<TOTAL){OFFSET+=LIMIT;loadData(false)}}
 function render(){
- let d=filtered(),students=new Set(d.map(x=>x.student_name)).size,low=d.filter(x=>Number(x.overall_score)<7).length;
+ let d=DATA,students=new Set(d.map(x=>x.student_name)).size,low=d.filter(x=>Number(x.overall_score)<7).length;
  document.getElementById("summary").innerHTML=`<span class="pill">${d.length} lượt đọc</span><span class="pill">${students} học viên</span><span class="pill">${low} lượt dưới 7</span>`;
  document.getElementById("rows").innerHTML=d.length?d.map(x=>{
    let score=Number(x.overall_score||0),cls=score<7?"low":"good";
@@ -680,7 +720,7 @@ async function saveFeedback(id,status){
  catch(e){label.textContent="Lỗi: "+e.message}
 }
 
-loadData();
+fillDays();loadData();
 </script></body></html>
 """)
 
