@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.6.4-product"
+VERSION = "6.7-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -453,6 +453,28 @@ def api_students():
         return {"success":False,"error":str(error)}
 
 
+@app.get("/api/student/mailbox")
+def student_mailbox(student_id: str = "", student_name: str = ""):
+    try:
+        if not student_id and not student_name: return {"success":True,"messages":[]}
+        url=f"{SUPABASE_URL}/rest/v1/submissions"
+        params={"select":"id,item_id,day_number,hanzi,pinyin,teacher_feedback,teacher_feedback_status,reviewed_at,created_at,student_id,student_name","order":"reviewed_at.desc.nullslast,created_at.desc","limit":"200"}
+        if student_id and student_name:
+            safe=str(student_name).replace(","," ").replace("("," ").replace(")"," ").strip()
+            params["or"]=f"(student_id.eq.{student_id},student_name.eq.{safe})"
+        elif student_id: params["student_id"]=f"eq.{student_id}"
+        else: params["student_name"]=f"eq.{student_name}"
+        r=requests.get(url,headers=SUPABASE_HEADERS,params=params,timeout=20)
+        if not r.ok: raise RuntimeError(f"Không đọc được hộp thư: {r.status_code} {r.text}")
+        seen=set();rows=[]
+        for x in r.json():
+            if str(x.get("teacher_feedback_status") or "") not in ("good","retry","help","sent"): continue
+            key=(str(x.get("day_number")),str(x.get("item_id")))
+            if key in seen: continue
+            seen.add(key);rows.append(x)
+        return {"success":True,"messages":rows}
+    except Exception as error: return {"success":False,"error":str(error)}
+
 @app.get("/api/student/teacher-feedback")
 def student_teacher_feedback(student_id: str = "", student_name: str = "", day_number: int = 0):
     try:
@@ -784,6 +806,7 @@ button,input{font-family:inherit}.app{max-width:820px;margin:auto;padding:24px 1
 .scores{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:18px}.score-box{padding:15px 5px;border-radius:15px;background:var(--light);text-align:center}
 .score-value{font-size:24px;font-weight:800;color:var(--gd)}.score-name{margin-top:5px;color:var(--mu);font-size:10px}.score-status{margin-top:4px;color:var(--g);font-size:10px;font-weight:700}
 .feedback{margin-top:12px;padding:17px;border-radius:16px;background:var(--cream);line-height:1.55;font-size:14px}
+.mailbox-bar{margin:12px 0 16px;border:1px solid var(--bd);background:#fff;border-radius:16px;padding:13px 15px;display:flex;align-items:center;gap:12px;cursor:pointer}.mailbox-icon{font-size:24px;position:relative}.mailbox-badge{position:absolute;right:-9px;top:-7px;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--gd);color:#fff;font-size:11px;display:none;align-items:center;justify-content:center}.mailbox-title{font-weight:900;color:var(--gd)}.mailbox-sub{font-size:12px;color:var(--mu);margin-top:2px}.mailbox-arrow{margin-left:auto;font-weight:900;color:var(--g)}.mailbox-panel{display:none;background:#fff;border:1px solid var(--bd);border-radius:16px;padding:14px;margin:-8px 0 18px}.mailbox-panel.open{display:block}.mail-item{padding:11px 2px;border-bottom:1px solid var(--bd)}.mail-item:last-child{border-bottom:0}.mail-meta{font-size:12px;font-weight:900;color:var(--g);margin-bottom:5px}.mail-word{font-size:16px;font-weight:900}.mail-note{font-size:14px;line-height:1.5;margin-top:5px}.mail-action{margin-top:8px;border:0;border-radius:11px;padding:9px 13px;background:var(--gs);color:var(--gd);font-weight:900;cursor:pointer}
 .teacher-feedback-wrap{margin:12px 0 4px;display:none}.teacher-feedback-wrap.show{display:block}
 .teacher-feedback-summary{width:100%;border:1px solid var(--bd);background:#fff;border-radius:14px;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--gd);font-weight:900;cursor:pointer}
 .teacher-feedback-list{display:none;margin-top:8px}.teacher-feedback-list.open{display:block}
@@ -824,6 +847,9 @@ button,input{font-family:inherit}.app{max-width:820px;margin:auto;padding:24px 1
 <div class="student"><select id="studentSelect"><option value="">Chọn học viên</option></select></div>
 </header>
 
+<div class="mailbox-bar" id="mailboxBar" onclick="toggleMailbox()"><div class="mailbox-icon">✉️<span class="mailbox-badge" id="mailboxBadge"></span></div><div><div class="mailbox-title">Lời nhắn từ cô Vi Hùng</div><div class="mailbox-sub" id="mailboxSub">Chọn học viên để xem lời nhắn</div></div><div class="mailbox-arrow" id="mailboxArrow">›</div></div>
+<div class="mailbox-panel" id="mailboxPanel"></div>
+
 <section class="card">
 <div class="cal-top">
 <button class="month-btn" onclick="moveMonth(-1)">‹</button>
@@ -849,7 +875,7 @@ const studentSelect=document.getElementById("studentSelect");
 let STUDENTS=[];
 studentSelect.addEventListener("change",()=>{
  localStorage.setItem(STUDENT_KEY,studentSelect.value);
- if(currentDayId)loadTeacherFeedback();
+ loadMailbox();
 });
 function escMain(s){const d=document.createElement("div");d.textContent=String(s??"");return d.innerHTML}
 async function loadStudents(){
@@ -859,8 +885,35 @@ async function loadStudents(){
  studentSelect.innerHTML='<option value="">Chọn học viên</option>'+STUDENTS.map(s=>`<option value="${s.id}">${escMain(s.student_name)}</option>`).join("");
  const saved=localStorage.getItem(STUDENT_KEY)||"";
  if(STUDENTS.some(s=>String(s.id)===saved))studentSelect.value=saved;
+ setTimeout(()=>loadMailbox(),0);
 }
 
+let MAILBOX=[];
+async function loadMailbox(){
+ const panel=document.getElementById("mailboxPanel"),badge=document.getElementById("mailboxBadge"),sub=document.getElementById("mailboxSub");
+ if(!panel)return;panel.classList.remove("open");panel.innerHTML="";document.getElementById("mailboxArrow").innerText="›";
+ if(!studentSelect.value){MAILBOX=[];sub.innerText="Chọn học viên để xem lời nhắn";badge.style.display="none";return}
+ const st=STUDENTS.find(s=>String(s.id)===String(studentSelect.value)),name=st?.student_name||"";
+ try{
+  const r=await fetch(`/api/student/mailbox?student_id=${encodeURIComponent(studentSelect.value)}&student_name=${encodeURIComponent(name)}`),raw=await r.text();let d=JSON.parse(raw);
+  if(!d.success)throw Error(d.error);MAILBOX=d.messages||[];
+  const retry=MAILBOX.filter(x=>x.teacher_feedback_status==="retry").length;
+  badge.innerText=MAILBOX.length;badge.style.display=MAILBOX.length?"flex":"none";
+  sub.innerText=MAILBOX.length?(retry?`${MAILBOX.length} lời nhắn · ${retry} mục cần luyện lại`:`${MAILBOX.length} lời nhắn từ cô`):"Chưa có lời nhắn";
+  renderMailbox();
+ }catch(e){sub.innerText="Chưa tải được lời nhắn";badge.style.display="none"}
+}
+function mailStatus(s){return s==="retry"?"↻ Cần luyện lại":s==="help"?"💬 Cô sẽ hỗ trợ thêm":s==="good"?"✓ Đã tốt":"✓ Phản hồi của cô"}
+function renderMailbox(){
+ const p=document.getElementById("mailboxPanel");if(!MAILBOX.length){p.innerHTML='<div style="color:var(--mu)">Chưa có lời nhắn từ cô Vi Hùng.</div>';return}
+ p.innerHTML=MAILBOX.map(x=>`<div class="mail-item"><div class="mail-meta">${mailStatus(x.teacher_feedback_status)} · Day ${escMain(x.day_number||"")}</div><div class="mail-word">${escMain(x.hanzi||"")} <span style="font-weight:500;color:var(--mu)">${escMain(x.pinyin||"")}</span></div>${x.teacher_feedback?`<div class="mail-note">${escMain(x.teacher_feedback)}</div>`:""}${x.teacher_feedback_status==="retry"?`<button class="mail-action" onclick="event.stopPropagation();openMailboxPractice(${Number(x.day_number)||0},'${String(x.item_id||"").replace(/'/g,"")}')">🎙 Luyện lại</button>`:""}</div>`).join("");
+}
+function toggleMailbox(){const p=document.getElementById("mailboxPanel"),a=document.getElementById("mailboxArrow");const open=p.classList.toggle("open");a.innerText=open?"⌃":"›"}
+function openMailboxPractice(dayNumber,itemId){
+ const entry=Object.entries(COURSE).find(([_,v])=>Number(v.day)===Number(dayNumber));if(!entry)return;
+ const [dayId,lesson]=entry;openDay(dayId);const i=(lesson.items||[]).findIndex(x=>String(x.id)===String(itemId));if(i>=0){currentItemIndex=i;renderItemNav();renderCurrentItem()}
+ document.getElementById("mailboxPanel").classList.remove("open");document.getElementById("mailboxArrow").innerText="›";setTimeout(()=>document.querySelector(".practice")?.scrollIntoView({behavior:"smooth",block:"start"}),100);
+}
 let viewDate=new Date();
 viewDate.setDate(1);
 
@@ -973,7 +1026,6 @@ function renderLesson(){
     <div class="lesson-title">${l.title}</div>
     <div class="lesson-subtitle">${l.subtitle||""}</div>
     <div class="item-nav" id="itemNav"></div>
-    <div class="teacher-feedback-wrap" id="teacherFeedbackWrap"></div>
     <div class="practice">
       <div class="focus" id="focus"></div>
       <div class="hanzi" id="hanzi"></div>
@@ -997,7 +1049,7 @@ function renderLesson(){
       <div class="feedback"><div class="issue" id="mainIssue"></div><div id="feedbackText"></div><div class="enc" id="encouragement"></div></div>
       <div class="next-row"><button class="next" id="nextButton" onclick="nextItem()">Tiếp tục →</button></div>
     </div>`;
-  renderItemNav();renderCurrentItem();loadTeacherFeedback();
+  renderItemNav();renderCurrentItem();
 }
 
 function teacherStatusText(s){
