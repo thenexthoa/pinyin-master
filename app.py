@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.7-product"
+VERSION = "6.7.1-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -57,6 +57,7 @@ COURSE_CONFIG = {
     "start_date": "2026-08-19",
     "study_weekdays": [0, 2],  # Monday=0, Wednesday=2
     "holidays": {
+        "2026-08-31": "Nghỉ lễ",
         "2026-09-02": "Nghỉ lễ Quốc khánh"
     }
 }
@@ -935,7 +936,7 @@ function markItemDone(dayId,itemId,score){
 }
 
 /* Build fixed Mon/Wed schedule from 19/08/2026.
-   02/09 is holiday and DOES NOT consume a Day number. */
+   31/08 and 02/09 are holidays and DO NOT consume Day numbers. */
 function buildSchedule(maxDay=80){
   const map={};
   let d=new Date(CONFIG.start_date+"T00:00:00"), n=1, guard=0;
