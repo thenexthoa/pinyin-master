@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.7.1-product"
+VERSION = "6.8.1-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -380,6 +380,17 @@ async def evaluate(
         lesson, item = find_item(day_id, item_id, course)
         if not lesson or not item:
             return {"success": False, "error": "Không tìm thấy bài/từ luyện."}
+
+        # V6.8: personalize target from Supabase student profile.
+        # Dropdown still shows Vietnamese name only.
+        student_profile = fetch_student_profile(student_id.strip()) if student_id.strip() else None
+        item = personalize_item(item, student_profile)
+
+        # Do not score an unresolved personalized target.
+        unresolved = re.findall(r"\{[a-zA-Z0-9_]+\}", (item.get("hanzi") or "") + " " + (item.get("pinyin") or ""))
+        if unresolved:
+            return {"success": False, "error": "Thông tin cá nhân của học viên chưa đầy đủ để tạo câu luyện."}
+
         audio_bytes = await audio.read()
         if len(audio_bytes) < 1000:
             return {"success": False, "error": "Bản ghi quá ngắn. Hãy thử đọc lại."}
@@ -442,11 +453,49 @@ async def evaluate(
         return {"success": False, "error": str(error)}
 
 
+
+def fetch_student_profile(student_id):
+    if not student_id:
+        return None
+    url=f"{SUPABASE_URL}/rest/v1/students"
+    params={
+        "select":"id,student_code,student_name,name_cn,name_pinyin,department_vi,department_cn,department_pinyin",
+        "id":f"eq.{student_id}",
+        "limit":"1",
+    }
+    r=requests.get(url,headers=SUPABASE_HEADERS,params=params,timeout=20)
+    if not r.ok:
+        raise RuntimeError(f"Không đọc được hồ sơ học viên: {r.status_code} {r.text}")
+    rows=r.json()
+    return rows[0] if rows else None
+
+def personalize_item(item, student):
+    """Replace learner placeholders while keeping Google Sheet as the lesson master."""
+    x=dict(item or {})
+    if not student:
+        return x
+    values={
+        "name_vi": str(student.get("student_name") or "").strip(),
+        "name_cn": str(student.get("name_cn") or "").strip(),
+        "name_pinyin": str(student.get("name_pinyin") or "").strip(),
+        "department_vi": str(student.get("department_vi") or "").strip(),
+        "department_cn": str(student.get("department_cn") or "").strip(),
+        "department_pinyin": str(student.get("department_pinyin") or "").strip(),
+        # Backward compatibility for any older Master rows.
+        "student_name": str(student.get("student_name") or "").strip(),
+    }
+    for field in ("hanzi","pinyin","meaning","focus"):
+        text=str(x.get(field) or "")
+        for key,val in values.items():
+            text=text.replace("{"+key+"}",val)
+        x[field]=text
+    return x
+
 @app.get("/api/students")
 def api_students():
     try:
         url=f"{SUPABASE_URL}/rest/v1/students"
-        params={"select":"id,student_code,student_name","active":"eq.true","order":"student_name.asc"}
+        params={"select":"id,student_code,student_name,name_cn,name_pinyin,department_vi,department_cn,department_pinyin","active":"eq.true","order":"student_name.asc"}
         r=requests.get(url,headers=SUPABASE_HEADERS,params=params,timeout=30)
         if not r.ok: raise RuntimeError(f"Không đọc được danh sách học viên: {r.status_code} {r.text}")
         return {"success":True,"students":r.json()}
@@ -546,7 +595,14 @@ async def save_teacher_feedback(submission_id:int,payload:dict):
 @app.get("/api/admin/export.csv")
 def export_admin_csv():
     try:
-        rows=list_submissions(1000)
+        rows=[]
+        offset=0
+        while True:
+            batch,total=list_submissions(200,offset)
+            rows.extend(batch)
+            offset += len(batch)
+            if not batch or offset >= total:
+                break
         output=io.StringIO()
         output.write("\ufeff")
         w=csv.writer(output)
@@ -877,6 +933,7 @@ let STUDENTS=[];
 studentSelect.addEventListener("change",()=>{
  localStorage.setItem(STUDENT_KEY,studentSelect.value);
  loadMailbox();
+ if(currentDayId){renderItemNav();renderCurrentItem();}
 });
 function escMain(s){const d=document.createElement("div");d.textContent=String(s??"");return d.innerHTML}
 async function loadStudents(){
@@ -1093,7 +1150,15 @@ function retryTeacherItem(itemId){
   const i=items.findIndex(x=>String(x.id)===String(itemId));
   if(i>=0){currentItemIndex=i;renderItemNav();renderCurrentItem();document.querySelector(".practice")?.scrollIntoView({behavior:"smooth",block:"start"});}
 }
-function currentItem(){return COURSE[currentDayId].items[currentItemIndex]}
+function currentItem(){
+ const raw=(COURSE[currentDayId]?.items||[])[currentItemIndex]||null;
+ if(!raw)return null;
+ const st=STUDENTS.find(s=>String(s.id)===String(studentSelect.value));
+ if(!st)return raw;
+ const x={...raw},vals={name_vi:st.student_name||"",name_cn:st.name_cn||"",name_pinyin:st.name_pinyin||"",department_vi:st.department_vi||"",department_cn:st.department_cn||"",department_pinyin:st.department_pinyin||"",student_name:st.student_name||""};
+ ["hanzi","pinyin","meaning","focus"].forEach(k=>{let t=String(x[k]||"");Object.entries(vals).forEach(([a,b])=>{t=t.split("{"+a+"}").join(b)});x[k]=t});
+ return x;
+}
 
 function renderItemNav(){
   const nav=document.getElementById("itemNav");if(!nav)return;
