@@ -329,6 +329,25 @@ def list_submissions(limit=100, offset=0, q="", day_number=None, score_filter=""
     headers = dict(SUPABASE_HEADERS)
     headers["Prefer"] = "count=exact"
     response = requests.get(url, headers=headers, params=params, timeout=30)
+    if response.status_code == 416:
+        # PostgREST returns 416 when the requested offset is beyond the
+        # filtered result set. This is an empty page, not a database failure.
+        content_range = response.headers.get("content-range", "")
+        total = None
+        if "/" in content_range:
+            try:
+                total = int(content_range.rsplit("/", 1)[1])
+            except Exception:
+                pass
+        if total is None:
+            try:
+                import re
+                m = re.search(r"only\s+(\d+)\s+rows", response.text, re.I)
+                if m:
+                    total = int(m.group(1))
+            except Exception:
+                pass
+        return [], (total if total is not None else 0)
     if not response.ok:
         raise RuntimeError(f"Không đọc được submissions: {response.status_code} {response.text}")
     total = None
@@ -725,10 +744,10 @@ audio{width:240px;height:34px}.date{white-space:nowrap;font-size:11px;color:#7d8
 <div class="top"><div><div class="eyebrow">LÀM CHỦ PHÁT ÂM, TỰ TIN GIAO TIẾP · PINYIN MASTER</div><div class="title">Teacher Admin</div><div class="sub">Nghe lại bài học viên · kiểm tra điểm Gemini · lọc các trường hợp cần xem</div></div></div>
 <div class="card">
 <div class="filters">
-<input id="q" placeholder="Tìm tên học viên / chữ / pinyin..." oninput="render()">
-<select id="day" onchange="render()"><option value="">Tất cả Day</option></select>
-<select id="scoreFilter" onchange="render()"><option value="">Tất cả điểm</option><option value="low">Điểm tổng < 7</option><option value="tone">Thanh điệu < 7</option></select>
-<button class="refresh" onclick="loadData()">↻ Làm mới</button><button onclick="window.location.href='/api/admin/export.csv'">↓ Xuất Google Sheet</button>
+<input id="q" placeholder="Tìm tên học viên / chữ / pinyin..." oninput="scheduleFilterReload()">
+<select id="day" onchange="loadData(true)"><option value="">Tất cả Day</option></select>
+<select id="scoreFilter" onchange="loadData(true)"><option value="">Tất cả điểm</option><option value="low">Điểm tổng < 7</option><option value="tone">Thanh điệu < 7</option></select>
+<button class="refresh" onclick="loadData(true)">↻ Làm mới</button><button onclick="window.location.href='/api/admin/export.csv'">↓ Xuất Google Sheet</button>
 </div>
 <div class="summary" id="summary"></div>
 <div class="tablewrap"><table><thead><tr><th>THỜI GIAN</th><th>HỌC VIÊN</th><th>DAY</th><th>TỪ</th><th>AI NGHE</th><th>ĐIỂM</th><th>AUDIO</th><th>FEEDBACK AI</th><th>GV NHẬN XÉT</th></tr></thead><tbody id="rows"></tbody></table></div><div id="pager" style="display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:14px 4px"></div>
@@ -741,6 +760,10 @@ function esc(s){
  return div.innerHTML;
 }
 function fmtDate(v){if(!v)return "";let d=new Date(v);return d.toLocaleString("vi-VN")}
+function scheduleFilterReload(){
+ clearTimeout(SEARCH_TIMER);
+ SEARCH_TIMER=setTimeout(()=>loadData(true),300);
+}
 async function loadData(reset=false){
  if(reset)OFFSET=0;
  document.getElementById("rows").innerHTML='<tr><td colspan="9" class="empty">Đang tải...</td></tr>';
