@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.8.1-product"
+VERSION = "6.8.2-product"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -91,7 +91,12 @@ def score10(value):
 def fetch_course_from_google_sheet():
     if not GOOGLE_SHEET_WEBAPP_URL:
         raise RuntimeError("Chưa có GOOGLE_SHEET_WEBAPP_URL trong .env")
-    r = requests.get(GOOGLE_SHEET_WEBAPP_URL, params={"action":"course"}, timeout=30)
+    r = requests.get(
+        GOOGLE_SHEET_WEBAPP_URL,
+        params={"action":"course", "_ts": str(int(time.time() * 1000))},
+        headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+        timeout=30,
+    )
     if not r.ok:
         raise RuntimeError(f"Không đọc được Google Sheet: {r.status_code} {r.text}")
     data = r.json()
@@ -357,13 +362,17 @@ def create_signed_audio_url(audio_path, expires_in=3600):
 def get_course():
     try:
         course = fetch_course_from_google_sheet()
-        return {
-            "success": True,
-            "version": VERSION,
-            "course": course,
-            "config": COURSE_CONFIG,
-            "source": "google-sheet-live",
-        }
+        return Response(
+            content=json.dumps({
+                "success": True,
+                "version": VERSION,
+                "course": course,
+                "config": COURSE_CONFIG,
+                "source": "google-sheet-live",
+            }, ensure_ascii=False),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"},
+        )
     except Exception as error:
         return {"success": False, "error": str(error)}
 
@@ -1379,7 +1388,7 @@ function finishDay(){
 }
 
 async function init(){
-  const d=await(await fetch("/api/course")).json();
+  const d=await(await fetch("/api/course?_ts="+Date.now(), {cache:"no-store"})).json();
   if(!d.success)throw new Error("Không tải được dữ liệu.");
   COURSE=d.course;CONFIG=d.config;
   await loadStudents();
