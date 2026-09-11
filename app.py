@@ -148,8 +148,15 @@ def sync_submission_to_google_sheet(submission_id, student_id, student_name, les
 
 
 def evaluate_pronunciation(audio_bytes, mime_type, hanzi, pinyin, focus):
+    """V6.9 intermediate scoring architecture.
+
+    Gemini analyzes the real audio syllable-by-syllable. Python, not Gemini,
+    aggregates component scores and computes the final weighted score.
+    This keeps the language model as an acoustic/linguistic analyst while the
+    application owns the scoring policy.
+    """
     prompt = f"""
-Bạn là TRỢ LÝ PHÁT ÂM của Zhou Laoshi (cô Vi Hùng), hỗ trợ học viên người Việt luyện tiếng Trung phổ thông.
+Bạn là TRỢ LÝ PHÂN TÍCH PHÁT ÂM của Zhou Laoshi (cô Vi Hùng), hỗ trợ học viên người Việt luyện tiếng Trung phổ thông.
 Bạn KHÔNG tự xưng là Zhou Laoshi; bạn là trợ lý của cô.
 
 MỤC TIÊU
@@ -157,43 +164,48 @@ Hanzi: {hanzi}
 Pinyin mục tiêu: {pinyin}
 Trọng tâm: {focus}
 
-CÁCH CHẤM
-- Chỉ đánh giá AUDIO THỰC TẾ, không suy đoán từ chữ mục tiêu.
-- Chấm âm đầu, vận mẫu, thanh điệu ĐỘC LẬP; overall ưu tiên 25% / 30% / 45%.
-- THANH ĐIỆU là tiêu chí bắt buộc: phải nghe đường nét cao độ thực tế của từng âm tiết và đối chiếu với thanh mục tiêu. Không được cho đúng thanh chỉ vì nhận ra đúng từ/Hanzi.
-- Nếu người học đọc đúng âm đầu và vận mẫu nhưng sai thanh, tone_score PHẢI giảm tương ứng.
-- Nếu sai rõ một thanh (đọc nhầm thanh 1/2/3/4 hoặc thành khinh thanh), tone_score không được cao hơn 6.5.
-- Nếu thanh chưa đủ chuẩn nhưng còn nhận ra hướng thanh, tone_score nên ở khoảng 6.5–8.0, không mặc định 9–10.
-- Với biến điệu/khinh thanh, chấm theo DẠNG ĐỌC THỰC TẾ được yêu cầu trong Pinyin/trọng tâm.
-- Nếu audio chưa rõ hoặc chưa chắc, phản hồi thận trọng; không tự động cho điểm cao.
-- Khen ngợi chỉ là PHONG CÁCH DIỄN ĐẠT, không được làm tăng điểm hoặc che lỗi.
-- Luôn ghi nhận một điều học viên làm tốt trước khi chỉ ra lỗi, NẾU thực sự có điểm làm tốt.
-- Mỗi lượt chỉ chọn MỘT điểm quan trọng nhất để luyện thêm.
-- Ưu tiên đúng trọng tâm của mục luyện.
-- Không dùng lời phán xét nặng.
-- Nếu không có lỗi đáng kể, main_issue phải là "" và problem_syllable cũng có thể là "".
-- Tuyệt đối không trả "Không có", "None", "N/A" cho main_issue.
-- feedback: 1–2 câu tiếng Việt tự nhiên, dễ hiểu.
-- encouragement: một mẹo nhỏ hoặc lời mời đọc lại cụ thể, ngắn.
+NHIỆM VỤ V6.9 — PHÂN TÍCH, KHÔNG TỰ QUYẾT ĐỊNH ĐIỂM TỔNG
+1. Chỉ nghe AUDIO THỰC TẾ, không suy đoán người học đọc đúng vì nhận ra Hanzi/từ mục tiêu.
+2. Tách câu theo TỪNG ÂM TIẾT của Pinyin mục tiêu. Với mỗi âm tiết, đánh giá độc lập:
+   - initial_score: âm đầu, thang 0–10
+   - final_score: vận mẫu, thang 0–10
+   - tone_score: thanh điệu, thang 0–10
+3. KHÔNG trả overall_score. Python của ứng dụng sẽ tự tổng hợp và tính điểm cuối.
+4. Thanh điệu phải dựa vào cao độ/đường nét thực tế nghe được:
+   - thanh 1: cao, ngang, ổn định
+   - thanh 2: đi lên rõ
+   - thanh 3: thấp/hạ rồi chuyển hướng phù hợp ngữ cảnh
+   - thanh 4: bắt đầu đủ cao và rơi nhanh, mạnh, rõ
+   - khinh thanh/biến điệu: chấm theo dạng đọc thực tế được yêu cầu trong Pinyin/trọng tâm.
+5. Nếu sai rõ một thanh (nhầm 1/2/3/4 hoặc thành khinh thanh), tone_score của ÂM TIẾT đó không được cao hơn 6.5.
+6. Nếu hướng thanh còn nhận ra nhưng chưa đủ chuẩn, tone_score âm tiết đó khoảng 6.5–8.0; không mặc định 9–10.
+7. Nếu audio không đủ rõ để đánh giá một âm tiết, cho điểm thận trọng và ghi note ngắn; không tự động cho cao.
+8. Với âm tiết không có âm đầu thực (ví dụ a/o/e), initial_score phản ánh việc mở đầu âm tiết sạch, không thêm phụ âm lạ.
+9. Khen ngợi không được làm tăng điểm.
+10. Sau bảng phân tích, chọn MỘT lỗi quan trọng nhất để người học sửa. Ưu tiên trọng tâm của mục luyện.
+11. feedback: 1–2 câu tiếng Việt tự nhiên, trước hết ghi nhận điều thực sự làm tốt, sau đó nói đúng một điểm cần chỉnh.
+12. encouragement: một mẹo đọc lại cụ thể, ngắn.
+13. Nếu không có lỗi đáng kể, main_issue = "" và problem_syllable có thể = "".
+14. Không dùng "Không có", "None", "N/A" cho main_issue.
 
-GIỌNG PHẢN HỒI
-9.0–10: Rất tốt!
-8.0–8.9: Khá tốt!
-6.5–7.9: Thử chỉnh một chút
-<6.5: Mình luyện lại nhé
+Status từng âm tiết chỉ dùng: "Tốt", "Khá", "Cần luyện".
 
-Status kỹ thuật chỉ dùng: "Tốt", "Khá", "Cần luyện".
-
-Chỉ trả JSON:
+Chỉ trả JSON đúng cấu trúc:
 {{
   "heard_pinyin":"",
-  "initial_score":0,
-  "final_score":0,
-  "tone_score":0,
-  "overall_score":0,
-  "initial_status":"",
-  "final_status":"",
-  "tone_status":"",
+  "syllables":[
+    {{
+      "target":"",
+      "heard":"",
+      "initial_score":0,
+      "final_score":0,
+      "tone_score":0,
+      "initial_status":"",
+      "final_status":"",
+      "tone_status":"",
+      "note":""
+    }}
+  ],
   "problem_syllable":"",
   "main_issue":"",
   "feedback":"",
@@ -208,7 +220,7 @@ Không markdown.
             response = client.models.generate_content(
                 model=MODEL,
                 contents=[prompt, types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)],
-                config=types.GenerateContentConfig(temperature=0.15, response_mime_type="application/json"),
+                config=types.GenerateContentConfig(temperature=0.10, response_mime_type="application/json"),
             )
             break
         except Exception as e:
@@ -220,20 +232,75 @@ Không markdown.
             time.sleep(1.2 * (attempt + 1))
     if response is None:
         raise last_error or RuntimeError("AI temporarily unavailable")
-    result = extract_json(response.text)
-    for key in ["initial_score", "final_score", "tone_score", "overall_score"]:
-        result[key] = score10(result.get(key, 0))
-    issue = str(result.get("main_issue") or "").strip()
-    if issue.lower() in {"không có","khong co","none","n/a","null","no issue","không"}:
+
+    raw = extract_json(response.text)
+    syllables = raw.get("syllables") if isinstance(raw.get("syllables"), list) else []
+    clean_syllables = []
+    for syl in syllables:
+        if not isinstance(syl, dict):
+            continue
+        clean_syllables.append({
+            "target": str(syl.get("target") or "").strip(),
+            "heard": str(syl.get("heard") or "").strip(),
+            "initial_score": score10(syl.get("initial_score", 0)),
+            "final_score": score10(syl.get("final_score", 0)),
+            "tone_score": score10(syl.get("tone_score", 0)),
+            "initial_status": str(syl.get("initial_status") or "").strip(),
+            "final_status": str(syl.get("final_status") or "").strip(),
+            "tone_status": str(syl.get("tone_status") or "").strip(),
+            "note": str(syl.get("note") or "").strip(),
+        })
+
+    # V6.9: Gemini no longer supplies category totals or overall score.
+    # Python deterministically aggregates the per-syllable evidence.
+    if clean_syllables:
+        n = len(clean_syllables)
+        initial = score10(sum(float(x["initial_score"]) for x in clean_syllables) / n)
+        final = score10(sum(float(x["final_score"]) for x in clean_syllables) / n)
+        tone = score10(sum(float(x["tone_score"]) for x in clean_syllables) / n)
+    else:
+        # Fail closed: do not invent a high score if the model did not provide
+        # the required syllable analysis.
+        initial = final = tone = 0.0
+
+    overall = score10(initial * 0.25 + final * 0.30 + tone * 0.45)
+
+    def status_for(v):
+        v = float(v or 0)
+        if v >= 8.5:
+            return "Tốt"
+        if v >= 6.5:
+            return "Khá"
+        return "Cần luyện"
+
+    result = {
+        "heard_pinyin": str(raw.get("heard_pinyin") or "").strip(),
+        "syllables": clean_syllables,
+        "initial_score": initial,
+        "final_score": final,
+        "tone_score": tone,
+        "overall_score": overall,
+        "initial_status": status_for(initial),
+        "final_status": status_for(final),
+        "tone_status": status_for(tone),
+        "problem_syllable": str(raw.get("problem_syllable") or "").strip(),
+        "main_issue": str(raw.get("main_issue") or "").strip(),
+        "feedback": str(raw.get("feedback") or "").strip(),
+        "encouragement": str(raw.get("encouragement") or "").strip(),
+    }
+
+    issue = result["main_issue"]
+    if issue.lower() in {"không có", "khong co", "none", "n/a", "null", "no issue", "không"}:
         result["main_issue"] = ""
-    tone = float(result.get("tone_score") or 0)
+
+    # Scoring policy belongs to Python. Tone weakness must be visible to learner.
     if tone < 8:
-        result["tone_status"] = "Cần luyện" if tone < 6.5 else "Khá"
-        if not str(result.get("main_issue") or "").strip():
+        if not result["main_issue"]:
             result["main_issue"] = "Thanh điệu cần chỉnh"
-        fb = str(result.get("feedback") or "").strip()
+        fb = result["feedback"]
         if not any(w in fb.lower() for w in ["thanh", "cao độ", "giọng"]):
             result["feedback"] = (fb + " " if fb else "") + "Thanh điệu là điểm bạn cần ưu tiên chỉnh ở lượt này."
+
     return result
 
 
