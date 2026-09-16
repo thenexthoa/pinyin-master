@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.8.2-product"
+VERSION = "6.9.2-admin-timing"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -372,6 +372,26 @@ def insert_submission(student_name, student_id, lesson, item, audio_path, result
     rows = response.json()
     return rows[0] if rows else payload
 
+def save_submission_timing(submission_id, timing):
+    """Persist diagnostic timings for Teacher Admin only."""
+    if not submission_id:
+        return
+    body = {
+        "course_ms": timing.get("course_ms"),
+        "profile_ms": timing.get("profile_ms"),
+        "audio_read_ms": timing.get("audio_read_ms"),
+        "gemini_ms": timing.get("gemini_ms"),
+        "audio_upload_ms": timing.get("audio_upload_ms"),
+        "submission_ms": timing.get("submission_ms"),
+        "sheet_sync_ms": timing.get("sheet_sync_ms"),
+        "total_ms": timing.get("total_ms"),
+    }
+    url = f"{SUPABASE_URL}/rest/v1/submissions"
+    headers = {**SUPABASE_HEADERS, "Content-Type": "application/json"}
+    r = requests.patch(url, headers=headers, params={"id": f"eq.{submission_id}"}, json=body, timeout=20)
+    if not r.ok:
+        print("TIMING SAVE ERROR:", r.status_code, r.text)
+
 def list_submissions(limit=100, offset=0, q="", day_number=None, score_filter=""):
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
@@ -470,82 +490,71 @@ async def evaluate(
     student_name: str = Form(""),
     student_id: str = Form(""),
 ):
+    t_total = time.perf_counter()
+    timing = {}
     try:
+        t = time.perf_counter()
         course = fetch_course_from_google_sheet()
         lesson, item = find_item(day_id, item_id, course)
+        timing["course_ms"] = round((time.perf_counter() - t) * 1000)
         if not lesson or not item:
             return {"success": False, "error": "Không tìm thấy bài/từ luyện."}
 
-        # V6.8: personalize target from Supabase student profile.
-        # Dropdown still shows Vietnamese name only.
+        t = time.perf_counter()
         student_profile = fetch_student_profile(student_id.strip()) if student_id.strip() else None
         item = personalize_item(item, student_profile)
+        timing["profile_ms"] = round((time.perf_counter() - t) * 1000)
 
-        # Do not score an unresolved personalized target.
         unresolved = re.findall(r"\{[a-zA-Z0-9_]+\}", (item.get("hanzi") or "") + " " + (item.get("pinyin") or ""))
         if unresolved:
             return {"success": False, "error": "Thông tin cá nhân của học viên chưa đầy đủ để tạo câu luyện."}
 
+        t = time.perf_counter()
         audio_bytes = await audio.read()
+        timing["audio_read_ms"] = round((time.perf_counter() - t) * 1000)
         if len(audio_bytes) < 1000:
             return {"success": False, "error": "Bản ghi quá ngắn. Hãy thử đọc lại."}
         if len(audio_bytes) > 8 * 1024 * 1024:
             return {"success": False, "error": "Bản ghi quá dài."}
 
         mime_type = audio.content_type or "audio/webm"
-        result = evaluate_pronunciation(
-            audio_bytes,
-            mime_type,
-            item["hanzi"],
-            item["pinyin"],
-            item["focus"],
-        )
+        t = time.perf_counter()
+        result = evaluate_pronunciation(audio_bytes, mime_type, item["hanzi"], item["pinyin"], item["focus"])
+        timing["gemini_ms"] = round((time.perf_counter() - t) * 1000)
 
         saved_name = student_name.strip() or "Chưa nhập tên"
-        audio_path = upload_audio_to_supabase(
-            audio_bytes,
-            mime_type,
-            student_id.strip(),
-            lesson["day"],
-            item["id"],
-        )
-        submission = insert_submission(
-            saved_name,
-            student_id.strip(),
-            lesson,
-            item,
-            audio_path,
-            result,
-        )
+        t = time.perf_counter()
+        audio_path = upload_audio_to_supabase(audio_bytes, mime_type, student_id.strip(), lesson["day"], item["id"])
+        timing["audio_upload_ms"] = round((time.perf_counter() - t) * 1000)
+
+        t = time.perf_counter()
+        submission = insert_submission(saved_name, student_id.strip(), lesson, item, audio_path, result)
+        timing["submission_ms"] = round((time.perf_counter() - t) * 1000)
 
         sheet_sync = {"success": False}
+        t = time.perf_counter()
         try:
-            sheet_sync = sync_submission_to_google_sheet(
-                submission.get("id"),
-                student_id.strip(),
-                saved_name,
-                lesson,
-                item,
-                result,
-            )
+            sheet_sync = sync_submission_to_google_sheet(submission.get("id"), student_id.strip(), saved_name, lesson, item, result)
         except Exception as sync_error:
             print("GOOGLE SHEET SYNC ERROR:", repr(sync_error))
+        timing["sheet_sync_ms"] = round((time.perf_counter() - t) * 1000)
+        timing["total_ms"] = round((time.perf_counter() - t_total) * 1000)
+        print("EVALUATE TIMING:", json.dumps(timing, ensure_ascii=False))
+        try:
+            save_submission_timing(submission.get("id"), timing)
+        except Exception as timing_error:
+            print("TIMING PERSIST ERROR:", repr(timing_error))
 
         return {
-            "success": True,
-            "version": VERSION,
-            "student_name": saved_name,
-            "day_id": day_id,
-            "day": lesson["day"],
-            "item": item,
-            "result": result,
-            "saved": True,
-            "submission_id": submission.get("id"),
-            "sheet_synced": bool(sheet_sync.get("success")),
+            "success": True, "version": VERSION, "student_name": saved_name,
+            "day_id": day_id, "day": lesson["day"], "item": item, "result": result,
+            "saved": True, "submission_id": submission.get("id"),
+            "sheet_synced": bool(sheet_sync.get("success")), "timing": timing,
         }
     except Exception as error:
-        print("EVALUATE ERROR:", repr(error))
-        return {"success": False, "error": str(error)}
+        timing["total_ms"] = round((time.perf_counter() - t_total) * 1000)
+        print("EVALUATE ERROR:", repr(error), "TIMING:", json.dumps(timing, ensure_ascii=False))
+        return {"success": False, "error": str(error), "timing": timing}
 
 
 
@@ -817,7 +826,7 @@ audio{width:240px;height:34px}.date{white-space:nowrap;font-size:11px;color:#7d8
 <button class="refresh" onclick="loadData(true)">↻ Làm mới</button><button onclick="window.location.href='/api/admin/export.csv'">↓ Xuất Google Sheet</button>
 </div>
 <div class="summary" id="summary"></div>
-<div class="tablewrap"><table><thead><tr><th>THỜI GIAN</th><th>HỌC VIÊN</th><th>DAY</th><th>TỪ</th><th>AI NGHE</th><th>ĐIỂM</th><th>AUDIO</th><th>FEEDBACK AI</th><th>GV NHẬN XÉT</th></tr></thead><tbody id="rows"></tbody></table></div><div id="pager" style="display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:14px 4px"></div>
+<div class="tablewrap"><table><thead><tr><th>THỜI GIAN</th><th>HỌC VIÊN</th><th>DAY</th><th>TỪ</th><th>AI NGHE</th><th>ĐIỂM</th><th>AUDIO</th><th>HIỆU NĂNG</th><th>FEEDBACK AI</th><th>GV NHẬN XÉT</th></tr></thead><tbody id="rows"></tbody></table></div><div id="pager" style="display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:14px 4px"></div>
 </div></div>
 <script>
 let DATA=[],TOTAL=0,OFFSET=0,LIMIT=100,SEARCH_TIMER=null;
@@ -833,7 +842,7 @@ function scheduleFilterReload(){
 }
 async function loadData(reset=false){
  if(reset)OFFSET=0;
- document.getElementById("rows").innerHTML='<tr><td colspan="9" class="empty">Đang tải...</td></tr>';
+ document.getElementById("rows").innerHTML='<tr><td colspan="10" class="empty">Đang tải...</td></tr>';
  const q=document.getElementById("q").value.trim();
  const day=document.getElementById("day").value;
  const sf=document.getElementById("scoreFilter").value;
@@ -845,7 +854,7 @@ async function loadData(reset=false){
    let r=await fetch("/api/admin/submissions?"+qs.toString()),d=await r.json();
    if(!d.success)throw Error(d.error);
    DATA=d.submissions||[];TOTAL=Number(d.total||0);render();renderPager();
- }catch(e){document.getElementById("rows").innerHTML=`<tr><td colspan="9" class="empty">Lỗi: ${esc(e.message)}</td></tr>`}
+ }catch(e){document.getElementById("rows").innerHTML=`<tr><td colspan="10" class="empty">Lỗi: ${esc(e.message)}</td></tr>`}
 }
 function fillDays(){
  let s=document.getElementById("day"),cur=s.value;
@@ -862,6 +871,12 @@ function renderPager(){
 }
 function prevPage(){OFFSET=Math.max(0,OFFSET-LIMIT);loadData(false)}
 function nextPage(){if(OFFSET+LIMIT<TOTAL){OFFSET+=LIMIT;loadData(false)}}
+function timingCell(x){
+ const total=Number(x.total_ms||0), ai=Number(x.gemini_ms||0);
+ if(!total && !ai) return '<span class="muted">Chưa đo</span>';
+ const sec=v=>(Number(v||0)/1000).toFixed(1)+'s';
+ return `<strong>Tổng ${sec(total)}</strong><br><span class="muted">AI ${sec(ai)} · Sheet ${sec(x.course_ms)}<br>Upload ${sec(x.audio_upload_ms)} · Lưu ${sec(x.submission_ms)} · Sync ${sec(x.sheet_sync_ms)}</span>`;
+}
 function render(){
  let d=DATA,students=new Set(d.map(x=>x.student_name)).size,low=d.filter(x=>Number(x.overall_score)<7).length;
  document.getElementById("summary").innerHTML=`<span class="pill">${d.length} lượt đọc</span><span class="pill">${students} học viên</span><span class="pill">${low} lượt dưới 7</span>`;
@@ -871,6 +886,7 @@ function render(){
    <td><div class="hanzi">${esc(x.hanzi)}</div><div class="py">${esc(x.pinyin)}</div></td><td>${esc(x.heard_pinyin||"—")}</td>
    <td><div class="score ${cls}">${esc(x.overall_score)}/10</div><div class="muted">Âm đầu ${esc(x.initial_score)} · Vận ${esc(x.final_score)} · Thanh ${esc(x.tone_score)}</div></td>
    <td id="audio-${x.id}"><button class="listen" onclick="playAudio(${x.id})">▶ Nghe</button></td>
+   <td class="detail">${timingCell(x)}</td>
    <td class="detail"><strong>${esc(x.main_issue||"")}</strong><br>${esc(x.feedback||"")}</td>
    <td class="detail"><textarea id="tf-${x.id}" style="width:250px;min-height:72px;border:1px solid #e1e9e5;border-radius:10px;padding:8px">${esc(x.teacher_feedback||"")}</textarea>
    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
@@ -880,7 +896,7 @@ function render(){
      <button onclick="saveFeedback(${x.id},'help')">💬 Cần cô hỗ trợ</button>
    </div>
    <div class="muted" id="tfs-${x.id}">${feedbackStatusLabel(x.teacher_feedback_status)}</div></td></tr>`}).join("")
-   :'<tr><td colspan="9" class="empty">Chưa có dữ liệu phù hợp.</td></tr>';
+   :'<tr><td colspan="10" class="empty">Chưa có dữ liệu phù hợp.</td></tr>';
 }
 function playAudio(id){
  let box=document.getElementById("audio-"+id);
@@ -1396,7 +1412,13 @@ async function toggleRecording(){
 async function sendAudio(blob,mimeType="audio/webm"){
   const b=document.getElementById("recordButton"),status=document.getElementById("status"),x=currentItem();
   if(!blob || blob.size===0){status.innerText="Bản ghi chưa có âm thanh. Hãy thử lại.";b.disabled=false;return;}
+  // V6.9.3: khóa chính xác bài đang được chấm để tránh phản hồi của item trước
+  // hiển thị sang item mới nếu người học chuyển câu trong lúc AI đang xử lý.
+  const requestDayId=String(currentDayId||"");
+  const requestItemId=String(x.id||"");
   sending=true;b.disabled=true;status.innerText="AI đang nghe và phản hồi...";
+  const nav=document.getElementById("itemNav");
+  if(nav){nav.style.pointerEvents="none";nav.style.opacity="0.65";}
   const f=new FormData();
   if(!studentSelect.value){status.innerText="Vui lòng chọn học viên trước khi nộp.";sending=false;b.disabled=false;return;}
   const st=STUDENTS.find(s=>String(s.id)===String(studentSelect.value));
@@ -1412,10 +1434,23 @@ async function sendAudio(blob,mimeType="audio/webm"){
       throw new Error("Phản hồi từ máy chủ chưa hợp lệ. Bạn thử lại nhé.");
     }
     if(!r.ok || !d.success)throw new Error(d?.error||"Không chấm được.");
-    showResult(d.result);markItemDone(currentDayId,x.id,d.result.overall_score);status.innerText="Đã nhận phản hồi";
+    // Chỉ hiển thị kết quả nếu người học vẫn đang đứng đúng item đã gửi đi.
+    // Kết quả của item cũ tuyệt đối không được gắn lên màn hình item mới.
+    const now=currentItem();
+    const sameTarget=String(currentDayId||"")===requestDayId && now && String(now.id||"")===requestItemId;
+    markItemDone(requestDayId,requestItemId,d.result.overall_score);
+    if(sameTarget){
+      showResult(d.result);
+      status.innerText="Đã nhận phản hồi";
+    }else{
+      document.getElementById("result").style.display="none";
+      status.innerText="Đã lưu phản hồi của câu vừa đọc. Bạn có thể luyện câu hiện tại.";
+    }
   }catch(e){status.innerText="Lỗi: "+e.message}
   finally{
     sending=false;b.disabled=false;
+    const nav=document.getElementById("itemNav");
+    if(nav){nav.style.pointerEvents="";nav.style.opacity="";}
     b.innerText="🎙️ Bắt đầu đọc";b.classList.remove("recording");
   }
 }
