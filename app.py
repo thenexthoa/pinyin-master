@@ -1412,13 +1412,7 @@ async function toggleRecording(){
 async function sendAudio(blob,mimeType="audio/webm"){
   const b=document.getElementById("recordButton"),status=document.getElementById("status"),x=currentItem();
   if(!blob || blob.size===0){status.innerText="Bản ghi chưa có âm thanh. Hãy thử lại.";b.disabled=false;return;}
-  // V6.9.3: khóa chính xác bài đang được chấm để tránh phản hồi của item trước
-  // hiển thị sang item mới nếu người học chuyển câu trong lúc AI đang xử lý.
-  const requestDayId=String(currentDayId||"");
-  const requestItemId=String(x.id||"");
   sending=true;b.disabled=true;status.innerText="AI đang nghe và phản hồi...";
-  const nav=document.getElementById("itemNav");
-  if(nav){nav.style.pointerEvents="none";nav.style.opacity="0.65";}
   const f=new FormData();
   if(!studentSelect.value){status.innerText="Vui lòng chọn học viên trước khi nộp.";sending=false;b.disabled=false;return;}
   const st=STUDENTS.find(s=>String(s.id)===String(studentSelect.value));
@@ -1434,23 +1428,11 @@ async function sendAudio(blob,mimeType="audio/webm"){
       throw new Error("Phản hồi từ máy chủ chưa hợp lệ. Bạn thử lại nhé.");
     }
     if(!r.ok || !d.success)throw new Error(d?.error||"Không chấm được.");
-    // Chỉ hiển thị kết quả nếu người học vẫn đang đứng đúng item đã gửi đi.
-    // Kết quả của item cũ tuyệt đối không được gắn lên màn hình item mới.
-    const now=currentItem();
-    const sameTarget=String(currentDayId||"")===requestDayId && now && String(now.id||"")===requestItemId;
-    markItemDone(requestDayId,requestItemId,d.result.overall_score);
-    if(sameTarget){
-      showResult(d.result);
-      status.innerText="Đã nhận phản hồi";
-    }else{
-      document.getElementById("result").style.display="none";
-      status.innerText="Đã lưu phản hồi của câu vừa đọc. Bạn có thể luyện câu hiện tại.";
-    }
+    showResult(d.result);markItemDone(currentDayId,x.id,d.result.overall_score);
+    status.innerText="Đã nhận phản hồi";
   }catch(e){status.innerText="Lỗi: "+e.message}
   finally{
     sending=false;b.disabled=false;
-    const nav=document.getElementById("itemNav");
-    if(nav){nav.style.pointerEvents="";nav.style.opacity="";}
     b.innerText="🎙️ Bắt đầu đọc";b.classList.remove("recording");
   }
 }
