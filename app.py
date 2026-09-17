@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.9.2-admin-dashboard"
+VERSION = "6.9.2-admin-dashboard-clickable"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -813,6 +813,59 @@ def admin_submissions(limit: int = 100, offset: int = 0, q: str = "", day_number
     except Exception as error:
         return {"success": False, "error": str(error)}
 
+
+def list_task_submissions(task_filter="", limit=100, offset=0):
+    """Task views for Teacher Admin. Read-only; keeps all history/audio."""
+    limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
+    url = f"{SUPABASE_URL}/rest/v1/submissions"
+    all_rows=[]; pos=0; page=1000
+    while True:
+        r=requests.get(url,headers=SUPABASE_HEADERS,params={"select":"*","order":"created_at.desc","limit":str(page),"offset":str(pos)},timeout=30)
+        if not r.ok: raise RuntimeError(f"Không đọc được hàng chờ: {r.status_code} {r.text}")
+        batch=r.json(); all_rows.extend(batch)
+        if len(batch)<page: break
+        pos += len(batch)
+    reviewed_states={"good","retry","help","sent"}
+    def skey(x): return str(x.get("student_id") or x.get("student_name") or "").strip()
+    def ikey(x): return (skey(x),str(x.get("item_id") or ""))
+    def ts(x):
+        try:return datetime.fromisoformat(str(x.get("created_at") or "").replace("Z","+00:00")).timestamp()
+        except:return 0
+    reviewed_students={skey(x) for x in all_rows if skey(x) and str(x.get("teacher_feedback_status") or "") in reviewed_states}
+    pending=[x for x in all_rows if str(x.get("teacher_feedback_status") or "") not in reviewed_states]
+    if task_filter=="pending": rows=pending
+    elif task_filter=="never": rows=[x for x in pending if skey(x) not in reviewed_students]
+    elif task_filter=="retry":
+        last_retry={}
+        for x in all_rows:
+            if str(x.get("teacher_feedback_status") or "")=="retry": last_retry[ikey(x)]=max(last_retry.get(ikey(x),0),ts(x))
+        rows=[x for x in pending if last_retry.get(ikey(x),0) and ts(x)>last_retry[ikey(x)]]
+    elif task_filter=="duplicate":
+        groups={}
+        for x in all_rows:
+            try: day=datetime.fromisoformat(str(x.get("created_at") or "").replace("Z","+00:00")).date().isoformat()
+            except: day=str(x.get("created_at") or "")[:10]
+            groups.setdefault((skey(x),str(x.get("item_id") or ""),day),[]).append(x)
+        ids=set()
+        for g in groups.values():
+            g=sorted(g,key=ts)
+            for a,b in zip(g,g[1:]):
+                try: close=abs(float(a.get("overall_score") or 0)-float(b.get("overall_score") or 0))<=.2
+                except: close=False
+                if 0<=ts(b)-ts(a)<=120 and close: ids.update([a.get("id"),b.get("id")])
+        rows=[x for x in all_rows if x.get("id") in ids]
+    else: rows=all_rows
+    rows=sorted(rows,key=ts,reverse=True)
+    return rows[offset:offset+limit],len(rows)
+
+@app.get("/api/admin/tasks")
+def admin_tasks(task_filter: str = "pending", limit: int = 100, offset: int = 0):
+    try:
+        rows,total=list_task_submissions(task_filter,limit,offset)
+        return {"success":True,"submissions":rows,"total":total,"limit":limit,"offset":offset,"task_filter":task_filter}
+    except Exception as error:
+        return {"success":False,"error":str(error)}
+
 @app.get("/api/admin/audio-stream/{submission_id}")
 def admin_audio_stream(submission_id: int):
     try:
@@ -894,7 +947,7 @@ def admin_page():
 .filters{display:grid;grid-template-columns:2fr 1fr 1fr auto auto;gap:9px;margin-bottom:15px}
 input,select,button{min-height:42px;border-radius:11px;border:1px solid #e1e9e5;padding:0 12px;font:inherit;background:#fff}
 button{cursor:pointer;font-weight:700;color:#285f4d}.refresh{background:#285f4d;color:white;border-color:#285f4d}
-.dashboard{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.task{border:1px solid #e1e9e5;border-radius:16px;padding:14px;background:#fbfdfc}.task .n{font-size:28px;font-weight:900;color:#194839}.task .k{font-size:12px;font-weight:800;margin-top:3px}.task .h{font-size:11px;color:#7d8c85;margin-top:5px;line-height:1.35}.task.warn{background:#fff9ef}.task.hot{background:#fff4f2}.task.soft{background:#f3f8f6}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.pill{background:#eaf3ef;color:#285f4d;border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700}
+.dashboard{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.task{border:1px solid #e1e9e5;border-radius:16px;padding:14px;background:#fbfdfc;cursor:pointer;transition:.15s}.task:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(25,72,57,.08)}.task.active{outline:3px solid #2b6b55;outline-offset:2px}.task .n{font-size:28px;font-weight:900;color:#194839}.task .k{font-size:12px;font-weight:800;margin-top:3px}.task .h{font-size:11px;color:#7d8c85;margin-top:5px;line-height:1.35}.task.warn{background:#fff9ef}.task.hot{background:#fff4f2}.task.soft{background:#f3f8f6}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.pill{background:#eaf3ef;color:#285f4d;border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700}
 .tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:940px}th{text-align:left;font-size:10px;letter-spacing:.6px;color:#7d8c85;padding:10px;border-bottom:1px solid #e1e9e5}
 td{padding:11px 10px;border-bottom:1px solid #edf1ef;font-size:13px;vertical-align:top}.hanzi{font-size:21px;font-weight:700}.py{color:#285f4d;font-weight:700}
 .score{font-size:18px;font-weight:800}.low{color:#a94848}.good{color:#285f4d}.listen{border:0;background:#eaf3ef;color:#285f4d;min-height:34px;padding:0 11px}
@@ -928,6 +981,7 @@ function scheduleFilterReload(){
  clearTimeout(SEARCH_TIMER);
  SEARCH_TIMER=setTimeout(()=>loadData(true),300);
 }
+let TASK_FILTER="";
 async function loadData(reset=false){
  if(reset)OFFSET=0;
  document.getElementById("rows").innerHTML='<tr><td colspan="10" class="empty">Đang tải...</td></tr>';
@@ -939,7 +993,8 @@ async function loadData(reset=false){
  if(day)qs.set("day_number",day);
  if(sf)qs.set("score_filter",sf);
  try{
-   let r=await fetch("/api/admin/submissions?"+qs.toString()),d=await r.json();
+   let endpoint=TASK_FILTER?("/api/admin/tasks?task_filter="+encodeURIComponent(TASK_FILTER)+"&"+qs.toString()):("/api/admin/submissions?"+qs.toString());
+   let r=await fetch(endpoint),d=await r.json();
    if(!d.success)throw Error(d.error);
    DATA=d.submissions||[];TOTAL=Number(d.total||0);render();renderPager();
  }catch(e){document.getElementById("rows").innerHTML=`<tr><td colspan="10" class="empty">Lỗi: ${esc(e.message)}</td></tr>`}
@@ -952,12 +1007,22 @@ async function loadDashboard(){
   if(!d.success)throw Error(d.error);
   const names=(d.never_reviewed_names||[]).slice(0,5).map(esc).join(", ");
   box.innerHTML=`
-   <div class="task hot"><div class="n">${d.pending_count||0}</div><div class="k">BÀI ĐANG CHỜ CHẤM</div><div class="h">Từ ${d.pending_students||0} học viên · mới nhất ${d.newest_submission_at?esc(fmtDate(d.newest_submission_at)):"—"}</div></div>
-   <div class="task warn"><div class="n">${d.never_reviewed_students||0}</div><div class="k">HỌC VIÊN CHƯA TỪNG ĐƯỢC CHẤM</div><div class="h">${names||"Không có"}${(d.never_reviewed_names||[]).length>5?"…":""}</div></div>
-   <div class="task soft"><div class="n">${d.resubmitted_count||0}</div><div class="k">BÀI GỬI LẠI SAU “LUYỆN LẠI”</div><div class="h">${d.resubmitted_students||0} học viên · nên ưu tiên kiểm tra</div></div>
-   <div class="task"><div class="n">${d.suspected_duplicate_count||0}</div><div class="k">NGHI GỬI TRÙNG DO MẠNG</div><div class="h">${d.suspected_duplicate_groups||0} cụm · chỉ đánh dấu, không xóa dữ liệu</div></div>`;
+   <div id="task-pending" class="task hot" onclick="setTaskFilter('pending')"><div class="n">${d.pending_count||0}</div><div class="k">BÀI ĐANG CHỜ CHẤM</div><div class="h">Từ ${d.pending_students||0} học viên · mới nhất ${d.newest_submission_at?esc(fmtDate(d.newest_submission_at)):"—"}</div></div>
+   <div id="task-never" class="task warn" onclick="setTaskFilter('never')"><div class="n">${d.never_reviewed_students||0}</div><div class="k">HỌC VIÊN CHƯA TỪNG ĐƯỢC CHẤM</div><div class="h">${names||"Không có"}${(d.never_reviewed_names||[]).length>5?"…":""}</div></div>
+   <div id="task-retry" class="task soft" onclick="setTaskFilter('retry')"><div class="n">${d.resubmitted_count||0}</div><div class="k">BÀI GỬI LẠI SAU “LUYỆN LẠI”</div><div class="h">${d.resubmitted_students||0} học viên · nên ưu tiên kiểm tra</div></div>
+   <div id="task-duplicate" class="task" onclick="setTaskFilter('duplicate')"><div class="n">${d.suspected_duplicate_count||0}</div><div class="k">NGHI GỬI TRÙNG DO MẠNG</div><div class="h">${d.suspected_duplicate_groups||0} cụm · chỉ đánh dấu, không xóa dữ liệu</div></div>`;
  }catch(e){box.innerHTML=`<div class="task"><div class="k">Không tải được tổng quan</div><div class="h">${esc(e.message)}</div></div>`}
 }
+
+function setTaskFilter(kind){
+ TASK_FILTER=kind; OFFSET=0;
+ document.querySelectorAll('.task').forEach(x=>x.classList.remove('active'));
+ const el=document.getElementById('task-'+kind); if(el)el.classList.add('active');
+ const labels={pending:'Bài đang chờ chấm',never:'Học viên chưa từng được chấm',retry:'Bài gửi lại sau “Luyện lại”',duplicate:'Nghi gửi trùng do mạng'};
+ const q=document.getElementById('q'); if(q)q.value='';
+ loadData(true).then(()=>{const t=document.querySelector('table'); if(t)t.scrollIntoView({behavior:'smooth',block:'start'});});
+}
+function clearTaskFilter(){TASK_FILTER='';OFFSET=0;document.querySelectorAll('.task').forEach(x=>x.classList.remove('active'));loadData(true)}
 
 function fillDays(){
  let s=document.getElementById("day"),cur=s.value;
@@ -982,7 +1047,8 @@ function timingCell(x){
 }
 function render(){
  let d=DATA,students=new Set(d.map(x=>x.student_name)).size,low=d.filter(x=>Number(x.overall_score)<7).length;
- document.getElementById("summary").innerHTML=`<span class="pill">${d.length} lượt đọc</span><span class="pill">${students} học viên</span><span class="pill">${low} lượt dưới 7</span>`;
+ const taskNames={pending:"Đang xem: Chờ chấm",never:"Đang xem: Chưa từng được chấm",retry:"Đang xem: Gửi lại sau Luyện lại",duplicate:"Đang xem: Nghi gửi trùng"};
+ document.getElementById("summary").innerHTML=`${TASK_FILTER?`<span class="pill">${taskNames[TASK_FILTER]} · <a href="#" onclick="clearTaskFilter();return false">Bỏ lọc ×</a></span>`:""}<span class="pill">${d.length} lượt đọc</span><span class="pill">${students} học viên</span><span class="pill">${low} lượt dưới 7</span>`;
  document.getElementById("rows").innerHTML=d.length?d.map(x=>{
    let score=Number(x.overall_score||0),cls=score<7?"low":"good";
    return `<tr><td class="date">${esc(fmtDate(x.created_at))}</td><td><strong>${esc(x.student_name)}</strong></td><td>Day ${esc(x.day_number)}</td>
