@@ -24,7 +24,7 @@ if not API_KEY:
     raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env")
 
 MODEL = "gemini-3.1-flash-lite"
-VERSION = "6.9.2-admin-timing"
+VERSION = "6.9.2-admin-dashboard"
 client = genai.Client(api_key=API_KEY)
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
@@ -448,6 +448,85 @@ def list_submissions(limit=100, offset=0, q="", day_number=None, score_filter=""
     return rows, (total if total is not None else len(rows))
 
 
+
+def get_admin_dashboard():
+    """Teacher workload overview across all submissions. Read-only; never deletes audio/history."""
+    url = f"{SUPABASE_URL}/rest/v1/submissions"
+    rows = []
+    offset = 0
+    page_size = 1000
+    select = "id,student_id,student_name,item_id,day_number,created_at,teacher_feedback_status,reviewed_at,overall_score"
+    while True:
+        params = {"select": select, "order": "created_at.desc", "limit": str(page_size), "offset": str(offset)}
+        r = requests.get(url, headers=SUPABASE_HEADERS, params=params, timeout=30)
+        if not r.ok:
+            raise RuntimeError(f"Không đọc được dashboard: {r.status_code} {r.text}")
+        batch = r.json()
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += len(batch)
+
+    reviewed_states = {"good", "retry", "help", "sent"}
+    def skey(x):
+        return str(x.get("student_id") or x.get("student_name") or "").strip()
+    def ikey(x):
+        return (skey(x), str(x.get("item_id") or ""))
+    def ts(x):
+        v = str(x.get("created_at") or "")
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0
+
+    reviewed_students = {skey(x) for x in rows if skey(x) and str(x.get("teacher_feedback_status") or "") in reviewed_states}
+    pending = [x for x in rows if str(x.get("teacher_feedback_status") or "") not in reviewed_states]
+    pending_students = {skey(x) for x in pending if skey(x)}
+    never_reviewed = pending_students - reviewed_students
+
+    # A new unreviewed submission after a teacher marked an earlier attempt as retry.
+    last_retry = {}
+    for x in rows:
+        if str(x.get("teacher_feedback_status") or "") == "retry":
+            k = ikey(x); last_retry[k] = max(last_retry.get(k, 0), ts(x))
+    resubmitted = [x for x in pending if last_retry.get(ikey(x), 0) and ts(x) > last_retry[ikey(x)]]
+
+    # Suspected network duplicates are only counted/flagged, never deleted.
+    # Same learner + same item + same calendar day, <=120s apart, near-identical AI score.
+    groups = {}
+    for x in rows:
+        try:
+            dt = datetime.fromisoformat(str(x.get("created_at") or "").replace("Z", "+00:00"))
+            day = dt.date().isoformat()
+        except Exception:
+            day = str(x.get("created_at") or "")[:10]
+        groups.setdefault((skey(x), str(x.get("item_id") or ""), day), []).append(x)
+    duplicate_ids = set()
+    duplicate_groups = 0
+    for g in groups.values():
+        g = sorted(g, key=ts)
+        found = False
+        for a,b in zip(g, g[1:]):
+            try: score_close = abs(float(a.get("overall_score") or 0)-float(b.get("overall_score") or 0)) <= 0.2
+            except Exception: score_close = False
+            if 0 <= ts(b)-ts(a) <= 120 and score_close:
+                duplicate_ids.add(a.get("id")); found = True
+        if found: duplicate_groups += 1
+
+    newest = rows[0].get("created_at") if rows else None
+    return {
+        "pending_count": len(pending),
+        "pending_students": len(pending_students),
+        "never_reviewed_students": len(never_reviewed),
+        "never_reviewed_names": sorted({str(x.get("student_name") or "") for x in pending if skey(x) in never_reviewed and x.get("student_name")})[:12],
+        "resubmitted_count": len(resubmitted),
+        "resubmitted_students": len({skey(x) for x in resubmitted if skey(x)}),
+        "suspected_duplicate_count": len(duplicate_ids),
+        "suspected_duplicate_groups": duplicate_groups,
+        "reviewed_students": len(reviewed_students),
+        "newest_submission_at": newest,
+    }
+
 def create_signed_audio_url(audio_path, expires_in=3600):
     url = f"{SUPABASE_URL}/storage/v1/object/sign/{AUDIO_BUCKET}/{audio_path}"
     headers = {**SUPABASE_HEADERS, "Content-Type": "application/json"}
@@ -718,6 +797,14 @@ def export_admin_csv():
     except Exception as error:
         return Response(content=str(error),status_code=500,media_type="text/plain")
 
+
+@app.get("/api/admin/dashboard")
+def admin_dashboard():
+    try:
+        return {"success": True, **get_admin_dashboard()}
+    except Exception as error:
+        return {"success": False, "error": str(error)}
+
 @app.get("/api/admin/submissions")
 def admin_submissions(limit: int = 100, offset: int = 0, q: str = "", day_number: str = "", score_filter: str = ""):
     try:
@@ -807,23 +894,24 @@ def admin_page():
 .filters{display:grid;grid-template-columns:2fr 1fr 1fr auto auto;gap:9px;margin-bottom:15px}
 input,select,button{min-height:42px;border-radius:11px;border:1px solid #e1e9e5;padding:0 12px;font:inherit;background:#fff}
 button{cursor:pointer;font-weight:700;color:#285f4d}.refresh{background:#285f4d;color:white;border-color:#285f4d}
-.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.pill{background:#eaf3ef;color:#285f4d;border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700}
+.dashboard{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.task{border:1px solid #e1e9e5;border-radius:16px;padding:14px;background:#fbfdfc}.task .n{font-size:28px;font-weight:900;color:#194839}.task .k{font-size:12px;font-weight:800;margin-top:3px}.task .h{font-size:11px;color:#7d8c85;margin-top:5px;line-height:1.35}.task.warn{background:#fff9ef}.task.hot{background:#fff4f2}.task.soft{background:#f3f8f6}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.pill{background:#eaf3ef;color:#285f4d;border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700}
 .tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:940px}th{text-align:left;font-size:10px;letter-spacing:.6px;color:#7d8c85;padding:10px;border-bottom:1px solid #e1e9e5}
 td{padding:11px 10px;border-bottom:1px solid #edf1ef;font-size:13px;vertical-align:top}.hanzi{font-size:21px;font-weight:700}.py{color:#285f4d;font-weight:700}
 .score{font-size:18px;font-weight:800}.low{color:#a94848}.good{color:#285f4d}.listen{border:0;background:#eaf3ef;color:#285f4d;min-height:34px;padding:0 11px}
 .detail{max-width:300px;color:#596760;line-height:1.4}.muted{color:#8b9891}.empty{text-align:center;padding:35px;color:#7d8c85}
 audio{width:240px;height:34px}.date{white-space:nowrap;font-size:11px;color:#7d8c85}
-@media(max-width:700px){.top{align-items:flex-start;flex-direction:column}.filters{grid-template-columns:1fr 1fr}.filters input{grid-column:1/-1}.wrap{padding:18px 10px}}
+@media(max-width:700px){.dashboard{grid-template-columns:1fr 1fr}.top{align-items:flex-start;flex-direction:column}.filters{grid-template-columns:1fr 1fr}.filters input{grid-column:1/-1}.wrap{padding:18px 10px}}
 </style>
 </head>
 <body><div class="wrap">
-<div class="top"><div><div class="eyebrow">LÀM CHỦ PHÁT ÂM, TỰ TIN GIAO TIẾP · PINYIN MASTER</div><div class="title">Teacher Admin</div><div class="sub">Nghe lại bài học viên · kiểm tra điểm Gemini · lọc các trường hợp cần xem</div></div></div>
+<div class="top"><div><div class="eyebrow">LÀM CHỦ PHÁT ÂM, TỰ TIN GIAO TIẾP · PINYIN MASTER</div><div class="title">Teacher Admin</div><div class="sub">Hàng chờ chấm bài · ưu tiên học viên chưa từng được chấm · theo dõi bài luyện lại</div></div></div>
 <div class="card">
+<div class="dashboard" id="dashboard"><div class="task"><div class="h">Đang tải nhiệm vụ...</div></div></div>
 <div class="filters">
 <input id="q" placeholder="Tìm tên học viên / chữ / pinyin..." oninput="scheduleFilterReload()">
 <select id="day" onchange="loadData(true)"><option value="">Tất cả Day</option></select>
 <select id="scoreFilter" onchange="loadData(true)"><option value="">Tất cả điểm</option><option value="low">Điểm tổng < 7</option><option value="tone">Thanh điệu < 7</option></select>
-<button class="refresh" onclick="loadData(true)">↻ Làm mới</button><button onclick="window.location.href='/api/admin/export.csv'">↓ Xuất Google Sheet</button>
+<button class="refresh" onclick="loadDashboard();loadData(true)">↻ Làm mới</button><button onclick="window.location.href='/api/admin/export.csv'">↓ Xuất Google Sheet</button>
 </div>
 <div class="summary" id="summary"></div>
 <div class="tablewrap"><table><thead><tr><th>THỜI GIAN</th><th>HỌC VIÊN</th><th>DAY</th><th>TỪ</th><th>AI NGHE</th><th>ĐIỂM</th><th>AUDIO</th><th>HIỆU NĂNG</th><th>FEEDBACK AI</th><th>GV NHẬN XÉT</th></tr></thead><tbody id="rows"></tbody></table></div><div id="pager" style="display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:14px 4px"></div>
@@ -856,6 +944,21 @@ async function loadData(reset=false){
    DATA=d.submissions||[];TOTAL=Number(d.total||0);render();renderPager();
  }catch(e){document.getElementById("rows").innerHTML=`<tr><td colspan="10" class="empty">Lỗi: ${esc(e.message)}</td></tr>`}
 }
+
+async function loadDashboard(){
+ const box=document.getElementById("dashboard");
+ try{
+  const r=await fetch("/api/admin/dashboard?t="+Date.now(),{cache:"no-store"}),d=await r.json();
+  if(!d.success)throw Error(d.error);
+  const names=(d.never_reviewed_names||[]).slice(0,5).map(esc).join(", ");
+  box.innerHTML=`
+   <div class="task hot"><div class="n">${d.pending_count||0}</div><div class="k">BÀI ĐANG CHỜ CHẤM</div><div class="h">Từ ${d.pending_students||0} học viên · mới nhất ${d.newest_submission_at?esc(fmtDate(d.newest_submission_at)):"—"}</div></div>
+   <div class="task warn"><div class="n">${d.never_reviewed_students||0}</div><div class="k">HỌC VIÊN CHƯA TỪNG ĐƯỢC CHẤM</div><div class="h">${names||"Không có"}${(d.never_reviewed_names||[]).length>5?"…":""}</div></div>
+   <div class="task soft"><div class="n">${d.resubmitted_count||0}</div><div class="k">BÀI GỬI LẠI SAU “LUYỆN LẠI”</div><div class="h">${d.resubmitted_students||0} học viên · nên ưu tiên kiểm tra</div></div>
+   <div class="task"><div class="n">${d.suspected_duplicate_count||0}</div><div class="k">NGHI GỬI TRÙNG DO MẠNG</div><div class="h">${d.suspected_duplicate_groups||0} cụm · chỉ đánh dấu, không xóa dữ liệu</div></div>`;
+ }catch(e){box.innerHTML=`<div class="task"><div class="k">Không tải được tổng quan</div><div class="h">${esc(e.message)}</div></div>`}
+}
+
 function fillDays(){
  let s=document.getElementById("day"),cur=s.value;
  s.innerHTML='<option value="">Tất cả Day</option>'+Array.from({length:32},(_,i)=>`<option value="${i+1}">Day ${i+1}</option>`).join("");
@@ -922,7 +1025,7 @@ async function saveFeedback(id,status){
  catch(e){label.textContent="Lỗi: "+e.message}
 }
 
-fillDays();loadData();
+fillDays();loadDashboard();loadData();
 </script></body></html>
 """)
 
