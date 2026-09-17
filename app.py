@@ -392,7 +392,7 @@ def save_submission_timing(submission_id, timing):
     if not r.ok:
         print("TIMING SAVE ERROR:", r.status_code, r.text)
 
-def list_submissions(limit=100, offset=0, q="", day_number=None, score_filter=""):
+def list_submissions(limit=100, offset=0, q="", day_number=None, score_filter="", review_filter=""):
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
     url = f"{SUPABASE_URL}/rest/v1/submissions"
@@ -806,15 +806,18 @@ def admin_dashboard():
         return {"success": False, "error": str(error)}
 
 @app.get("/api/admin/submissions")
-def admin_submissions(limit: int = 100, offset: int = 0, q: str = "", day_number: str = "", score_filter: str = ""):
+def admin_submissions(limit: int = 100, offset: int = 0, q: str = "", day_number: str = "", score_filter: str = "", review_filter: str = ""):
     try:
-        rows, total = list_submissions(limit, offset, q, day_number, score_filter)
+        if review_filter:
+            rows, total = list_task_submissions("", limit, offset, q, day_number, score_filter, review_filter)
+        else:
+            rows, total = list_submissions(limit, offset, q, day_number, score_filter)
         return {"success": True, "submissions": rows, "total": total, "limit": limit, "offset": offset}
     except Exception as error:
         return {"success": False, "error": str(error)}
 
 
-def list_task_submissions(task_filter="", limit=100, offset=0):
+def list_task_submissions(task_filter="", limit=100, offset=0, q="", day_number="", score_filter="", review_filter=""):
     """Task views for Teacher Admin. Read-only; keeps all history/audio."""
     limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
     url = f"{SUPABASE_URL}/rest/v1/submissions"
@@ -855,13 +858,27 @@ def list_task_submissions(task_filter="", limit=100, offset=0):
                 if 0<=ts(b)-ts(a)<=120 and close: ids.update([a.get("id"),b.get("id")])
         rows=[x for x in all_rows if x.get("id") in ids]
     else: rows=all_rows
+    # Combine dashboard task view with the ordinary Admin filters.
+    if day_number not in (None, ""):
+        rows=[x for x in rows if str(x.get("day_number") or "")==str(day_number)]
+    if score_filter=="low":
+        rows=[x for x in rows if float(x.get("overall_score") or 0)<7]
+    elif score_filter=="tone":
+        rows=[x for x in rows if float(x.get("tone_score") or 0)<7]
+    if review_filter=="unreviewed":
+        rows=[x for x in rows if str(x.get("teacher_feedback_status") or "").strip() not in reviewed_states]
+    elif review_filter=="reviewed":
+        rows=[x for x in rows if str(x.get("teacher_feedback_status") or "").strip() in reviewed_states]
+    q=str(q or "").strip().lower()
+    if q:
+        rows=[x for x in rows if q in " ".join(str(x.get(k) or "") for k in ("student_name","hanzi","pinyin","heard_pinyin")).lower()]
     rows=sorted(rows,key=ts,reverse=True)
     return rows[offset:offset+limit],len(rows)
 
 @app.get("/api/admin/tasks")
-def admin_tasks(task_filter: str = "pending", limit: int = 100, offset: int = 0):
+def admin_tasks(task_filter: str = "pending", limit: int = 100, offset: int = 0, q: str = "", day_number: str = "", score_filter: str = "", review_filter: str = ""):
     try:
-        rows,total=list_task_submissions(task_filter,limit,offset)
+        rows,total=list_task_submissions(task_filter,limit,offset,q,day_number,score_filter,review_filter)
         return {"success":True,"submissions":rows,"total":total,"limit":limit,"offset":offset,"task_filter":task_filter}
     except Exception as error:
         return {"success":False,"error":str(error)}
@@ -944,7 +961,7 @@ def admin_page():
 .wrap{max-width:1180px;margin:auto;padding:28px 16px 60px}.top{display:flex;justify-content:space-between;align-items:flex-end;gap:15px;margin-bottom:18px}
 .eyebrow{font-size:11px;letter-spacing:1.5px;color:#7d8c85}.title{font-size:28px;font-weight:800;color:#194839}.sub{color:#7d8c85;margin-top:5px;font-size:13px}
 .card{background:white;border-radius:20px;padding:18px;box-shadow:0 8px 35px rgba(31,58,47,.055)}
-.filters{display:grid;grid-template-columns:2fr 1fr 1fr auto auto;gap:9px;margin-bottom:15px}
+.filters{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto auto;gap:9px;margin-bottom:15px}
 input,select,button{min-height:42px;border-radius:11px;border:1px solid #e1e9e5;padding:0 12px;font:inherit;background:#fff}
 button{cursor:pointer;font-weight:700;color:#285f4d}.refresh{background:#285f4d;color:white;border-color:#285f4d}
 .dashboard{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.task{border:1px solid #e1e9e5;border-radius:16px;padding:14px;background:#fbfdfc;cursor:pointer;transition:.15s}.task:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(25,72,57,.08)}.task.active{outline:3px solid #2b6b55;outline-offset:2px}.task .n{font-size:28px;font-weight:900;color:#194839}.task .k{font-size:12px;font-weight:800;margin-top:3px}.task .h{font-size:11px;color:#7d8c85;margin-top:5px;line-height:1.35}.task.warn{background:#fff9ef}.task.hot{background:#fff4f2}.task.soft{background:#f3f8f6}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.pill{background:#eaf3ef;color:#285f4d;border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700}
@@ -963,6 +980,7 @@ audio{width:240px;height:34px}.date{white-space:nowrap;font-size:11px;color:#7d8
 <div class="filters">
 <input id="q" placeholder="Tìm tên học viên / chữ / pinyin..." oninput="scheduleFilterReload()">
 <select id="day" onchange="loadData(true)"><option value="">Tất cả Day</option></select>
+<select id="reviewFilter" onchange="loadData(true)"><option value="">Tất cả trạng thái</option><option value="unreviewed">Chưa chấm</option><option value="reviewed">Đã chấm</option></select>
 <select id="scoreFilter" onchange="loadData(true)"><option value="">Tất cả điểm</option><option value="low">Điểm tổng < 7</option><option value="tone">Thanh điệu < 7</option></select>
 <button class="refresh" onclick="loadDashboard();loadData(true)">↻ Làm mới</button><button onclick="window.location.href='/api/admin/export.csv'">↓ Xuất Google Sheet</button>
 </div>
@@ -987,10 +1005,12 @@ async function loadData(reset=false){
  document.getElementById("rows").innerHTML='<tr><td colspan="10" class="empty">Đang tải...</td></tr>';
  const q=document.getElementById("q").value.trim();
  const day=document.getElementById("day").value;
+ const rf=document.getElementById("reviewFilter").value;
  const sf=document.getElementById("scoreFilter").value;
  const qs=new URLSearchParams({limit:String(LIMIT),offset:String(OFFSET)});
  if(q)qs.set("q",q);
  if(day)qs.set("day_number",day);
+ if(rf)qs.set("review_filter",rf);
  if(sf)qs.set("score_filter",sf);
  try{
    let endpoint=TASK_FILTER?("/api/admin/tasks?task_filter="+encodeURIComponent(TASK_FILTER)+"&"+qs.toString()):("/api/admin/submissions?"+qs.toString());
