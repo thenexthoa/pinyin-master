@@ -467,7 +467,10 @@ def get_admin_dashboard():
             break
         offset += len(batch)
 
-    reviewed_states = {"draft", "good", "retry", "help", "sent"}
+    reviewed_states = {"good", "retry", "help", "sent"}
+    def is_reviewed(x):
+        status = str(x.get("teacher_feedback_status") or "").strip()
+        return status in reviewed_states or (status == "draft" and bool(x.get("reviewed_at")))
     def skey(x):
         return str(x.get("student_id") or x.get("student_name") or "").strip()
     def ikey(x):
@@ -479,8 +482,8 @@ def get_admin_dashboard():
         except Exception:
             return 0
 
-    reviewed_students = {skey(x) for x in rows if skey(x) and str(x.get("teacher_feedback_status") or "") in reviewed_states}
-    pending = [x for x in rows if str(x.get("teacher_feedback_status") or "") not in reviewed_states]
+    reviewed_students = {skey(x) for x in rows if skey(x) and is_reviewed(x)}
+    pending = [x for x in rows if not is_reviewed(x)]
     pending_students = {skey(x) for x in pending if skey(x)}
     never_reviewed = pending_students - reviewed_students
 
@@ -873,14 +876,17 @@ def list_task_submissions(task_filter="", limit=100, offset=0, q="", day_number=
         batch=r.json(); all_rows.extend(batch)
         if len(batch)<page: break
         pos += len(batch)
-    reviewed_states={"draft","good","retry","help","sent"}
+    reviewed_states={"good","retry","help","sent"}
+    def is_reviewed(x):
+        status=str(x.get("teacher_feedback_status") or "").strip()
+        return status in reviewed_states or (status=="draft" and bool(x.get("reviewed_at")))
     def skey(x): return str(x.get("student_id") or x.get("student_name") or "").strip()
     def ikey(x): return (skey(x),str(x.get("item_id") or ""))
     def ts(x):
         try:return datetime.fromisoformat(str(x.get("created_at") or "").replace("Z","+00:00")).timestamp()
         except:return 0
-    reviewed_students={skey(x) for x in all_rows if skey(x) and str(x.get("teacher_feedback_status") or "") in reviewed_states}
-    pending=[x for x in all_rows if str(x.get("teacher_feedback_status") or "") not in reviewed_states]
+    reviewed_students={skey(x) for x in all_rows if skey(x) and is_reviewed(x)}
+    pending=[x for x in all_rows if not is_reviewed(x)]
     if task_filter=="pending": rows=pending
     elif task_filter=="never": rows=[x for x in pending if skey(x) not in reviewed_students]
     elif task_filter=="retry":
@@ -911,9 +917,17 @@ def list_task_submissions(task_filter="", limit=100, offset=0, q="", day_number=
     elif score_filter=="tone":
         rows=[x for x in rows if float(x.get("tone_score") or 0)<7]
     if review_filter=="unreviewed":
-        rows=[x for x in rows if str(x.get("teacher_feedback_status") or "").strip() not in reviewed_states]
+        rows=[x for x in rows if not is_reviewed(x)]
+    elif review_filter=="draft_reviewed":
+        rows=[x for x in rows if str(x.get("teacher_feedback_status") or "").strip()=="draft" and bool(x.get("reviewed_at"))]
+    elif review_filter=="good":
+        rows=[x for x in rows if str(x.get("teacher_feedback_status") or "").strip()=="good"]
+    elif review_filter=="retry":
+        rows=[x for x in rows if str(x.get("teacher_feedback_status") or "").strip()=="retry"]
+    elif review_filter=="help":
+        rows=[x for x in rows if str(x.get("teacher_feedback_status") or "").strip()=="help"]
     elif review_filter=="reviewed":
-        rows=[x for x in rows if str(x.get("teacher_feedback_status") or "").strip() in reviewed_states]
+        rows=[x for x in rows if is_reviewed(x)]
     q=str(q or "").strip().lower()
     if q:
         rows=[x for x in rows if q in " ".join(str(x.get(k) or "") for k in ("student_name","hanzi","pinyin","heard_pinyin")).lower()]
@@ -1025,7 +1039,7 @@ audio{width:240px;height:34px}.date{white-space:nowrap;font-size:11px;color:#7d8
 <div class="filters">
 <input id="q" placeholder="Tìm tên học viên / chữ / pinyin..." oninput="scheduleFilterReload()">
 <select id="day" onchange="loadData(true)"><option value="">Tất cả Day</option></select>
-<select id="reviewFilter" onchange="loadData(true)"><option value="">Tất cả trạng thái</option><option value="unreviewed">Chưa chấm</option><option value="reviewed">Đã chấm</option></select>
+<select id="reviewFilter" onchange="loadData(true)"><option value="">Tất cả trạng thái</option><option value="unreviewed">Chưa chấm</option><option value="draft_reviewed">Nháp GV</option><option value="good">Đã tốt</option><option value="retry">Luyện lại</option><option value="help">Cần hỗ trợ</option><option value="reviewed">Tất cả đã xử lý</option></select>
 <select id="scoreFilter" onchange="loadData(true)"><option value="">Tất cả điểm</option><option value="low">Điểm tổng < 7</option><option value="tone">Thanh điệu < 7</option></select>
 <button class="refresh" onclick="loadDashboard();loadData(true)">↻ Làm mới</button><button onclick="window.location.href='/api/admin/export.csv'">↓ Xuất Google Sheet</button>
 </div>
@@ -1129,7 +1143,7 @@ function render(){
      <button onclick="saveFeedback(${x.id},'retry')">↻ Luyện lại</button>
      <button onclick="saveFeedback(${x.id},'help')">💬 Cần cô hỗ trợ</button>
    </div>
-   <div class="muted" id="tfs-${x.id}">${feedbackStatusLabel(x.teacher_feedback_status)}</div></td></tr>`}).join("")
+   <div class="muted" id="tfs-${x.id}">${feedbackStatusLabel(x.teacher_feedback_status,x.reviewed_at)}</div></td></tr>`}).join("")
    :'<tr><td colspan="10" class="empty">Chưa có dữ liệu phù hợp.</td></tr>';
 }
 function playAudio(id){
@@ -1141,18 +1155,20 @@ function playAudio(id){
    box.innerHTML='<span class="low">Không phát được audio. Kiểm tra log Python.</span>';
  });
 }
-function feedbackStatusLabel(s){
+function feedbackStatusLabel(s,reviewedAt){
  if(s==="good")return "✓ Đã tốt";
  if(s==="retry")return "↻ Đã gửi · Luyện lại";
  if(s==="help")return "💬 Đã gửi · Cần cô hỗ trợ";
  if(s==="sent")return "✓ Đã gửi";
- return "Nháp";
+ if(s==="draft" && reviewedAt)return "🟡 Nháp GV";
+ return "🔴 Chưa chấm";
 }
 async function saveFeedback(id,status){
  const text=document.getElementById("tf-"+id).value,label=document.getElementById("tfs-"+id);label.textContent="Đang lưu...";
  try{const r=await fetch("/api/admin/teacher-feedback/"+id,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({teacher_feedback:text,teacher_feedback_status:status})});
- const d=await r.json();if(!d.success)throw Error(d.error);label.textContent=status==="draft"?"Đã lưu nháp":feedbackStatusLabel(status);
- const row=DATA.find(x=>x.id===id);if(row){row.teacher_feedback=text;row.teacher_feedback_status=status}}
+ const d=await r.json();if(!d.success)throw Error(d.error);label.textContent=status==="draft"?"🟡 Nháp GV":feedbackStatusLabel(status,new Date().toISOString());
+ const row=DATA.find(x=>x.id===id);if(row){row.teacher_feedback=text;row.teacher_feedback_status=status;row.reviewed_at=new Date().toISOString()}
+ loadDashboard();
  catch(e){label.textContent="Lỗi: "+e.message}
 }
 
