@@ -1169,7 +1169,7 @@ async function saveFeedback(id,status){
  const d=await r.json();if(!d.success)throw Error(d.error);label.textContent=status==="draft"?"🟡 Nháp GV":feedbackStatusLabel(status,new Date().toISOString());
  const row=DATA.find(x=>x.id===id);if(row){row.teacher_feedback=text;row.teacher_feedback_status=status;row.reviewed_at=new Date().toISOString()}
  loadDashboard();
- catch(e){label.textContent="Lỗi: "+e.message}
+ }catch(e){label.textContent="Lỗi: "+e.message}
 }
 
 fillDays();loadDashboard();loadData();
@@ -1322,8 +1322,12 @@ async function loadMailbox(){
   const r=await fetch(`/api/student/mailbox?student_id=${encodeURIComponent(studentSelect.value)}&student_name=${encodeURIComponent(name)}`),raw=await r.text();let d=JSON.parse(raw);
   if(!d.success)throw Error(d.error);MAILBOX=d.messages||[];
   const retry=MAILBOX.filter(x=>x.teacher_feedback_status==="retry").length;
-  badge.innerText=MAILBOX.length;badge.style.display=MAILBOX.length?"flex":"none";
-  sub.innerText=MAILBOX.length?(retry?`${MAILBOX.length} lời nhắn · ${retry} mục cần luyện lại`:`${MAILBOX.length} lời nhắn từ cô`):"Chưa có lời nhắn";
+  const seenKey="pinyin_mail_seen_"+String(studentSelect.value||name||"");
+  let seenIds=[];try{seenIds=JSON.parse(localStorage.getItem(seenKey)||"[]")}catch{}
+  const seenSet=new Set((seenIds||[]).map(String));
+  const unread=MAILBOX.filter(x=>!seenSet.has(String(x.id))).length;
+  badge.innerText=unread;badge.style.display=unread?"flex":"none";
+  sub.innerText=MAILBOX.length?(unread?`${unread} thư mới · ${MAILBOX.length} lời nhắn`:(retry?`${MAILBOX.length} lời nhắn · ${retry} mục cần luyện lại`:`${MAILBOX.length} lời nhắn · đã xem`)):"Chưa có lời nhắn";
   renderMailbox();
  }catch(e){sub.innerText="Chưa tải được lời nhắn";badge.style.display="none"}
 }
@@ -1332,7 +1336,17 @@ function renderMailbox(){
  const p=document.getElementById("mailboxPanel");if(!MAILBOX.length){p.innerHTML='<div style="color:var(--mu)">Chưa có lời nhắn từ cô Vi Hùng.</div>';return}
  p.innerHTML=MAILBOX.map(x=>`<div class="mail-item"><div class="mail-meta">${mailStatus(x.teacher_feedback_status)} · Day ${escMain(x.day_number||"")}</div><div class="mail-word">${escMain(x.hanzi||"")} <span style="font-weight:500;color:var(--mu)">${escMain(x.pinyin||"")}</span></div>${x.teacher_feedback?`<div class="mail-note">${escMain(x.teacher_feedback)}</div>`:""}${x.teacher_feedback_status==="retry"?`<button class="mail-action" onclick="event.stopPropagation();openMailboxPractice(${Number(x.day_number)||0},'${String(x.item_id||"").replace(/'/g,"")}')">🎙 Luyện lại</button>`:""}</div>`).join("");
 }
-function toggleMailbox(){const p=document.getElementById("mailboxPanel"),a=document.getElementById("mailboxArrow");const open=p.classList.toggle("open");a.innerText=open?"⌃":"›"}
+function toggleMailbox(){
+ const p=document.getElementById("mailboxPanel"),a=document.getElementById("mailboxArrow");const open=p.classList.toggle("open");a.innerText=open?"⌃":"›";
+ if(open && studentSelect.value && MAILBOX.length){
+   const st=STUDENTS.find(x=>String(x.id)===String(studentSelect.value));
+   const seenKey="pinyin_mail_seen_"+String(studentSelect.value||st?.student_name||"");
+   localStorage.setItem(seenKey,JSON.stringify(MAILBOX.map(x=>String(x.id))));
+   const badge=document.getElementById("mailboxBadge");badge.style.display="none";badge.innerText="0";
+   const retry=MAILBOX.filter(x=>x.teacher_feedback_status==="retry").length;
+   document.getElementById("mailboxSub").innerText=retry?`${MAILBOX.length} lời nhắn · ${retry} mục cần luyện lại`:`${MAILBOX.length} lời nhắn · đã xem`;
+ }
+}
 function openMailboxPractice(dayNumber,itemId){
  const entry=Object.entries(COURSE).find(([_,v])=>Number(v.day)===Number(dayNumber));if(!entry)return;
  const [dayId,lesson]=entry;openDay(dayId);const i=(lesson.items||[]).findIndex(x=>String(x.id)===String(itemId));if(i>=0){currentItemIndex=i;renderItemNav();renderCurrentItem()}
