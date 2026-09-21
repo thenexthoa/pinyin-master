@@ -467,7 +467,7 @@ def get_admin_dashboard():
             break
         offset += len(batch)
 
-    reviewed_states = {"good", "retry", "help", "sent"}
+    reviewed_states = {"draft", "good", "retry", "help", "sent"}
     def skey(x):
         return str(x.get("student_id") or x.get("student_name") or "").strip()
     def ikey(x):
@@ -708,6 +708,51 @@ def student_mailbox(student_id: str = "", student_name: str = ""):
         return {"success":True,"messages":rows}
     except Exception as error: return {"success":False,"error":str(error)}
 
+@app.get("/api/student/progress")
+def student_progress(student_id: str = "", student_name: str = "", day_number: int = 0):
+    """Latest learner state per item. Keeps every submission; this endpoint only summarizes UI state."""
+    try:
+        if (not student_id and not student_name) or not day_number:
+            return {"success": True, "items": {}}
+        url=f"{SUPABASE_URL}/rest/v1/submissions"
+        params={
+            "select":"id,item_id,overall_score,created_at,teacher_feedback_status,reviewed_at,student_id,student_name",
+            "day_number":f"eq.{int(day_number)}",
+            "order":"created_at.desc",
+            "limit":"500",
+        }
+        if student_id and student_name:
+            safe=str(student_name).replace(","," ").replace("("," ").replace(")"," ").strip()
+            params["or"]=f"(student_id.eq.{student_id},student_name.eq.{safe})"
+        elif student_id:
+            params["student_id"]=f"eq.{student_id}"
+        else:
+            params["student_name"]=f"eq.{student_name}"
+        r=requests.get(url,headers=SUPABASE_HEADERS,params=params,timeout=20)
+        if not r.ok: raise RuntimeError(f"Không đọc được tiến trình: {r.status_code} {r.text}")
+        rows=r.json(); grouped={}
+        for x in rows:
+            iid=str(x.get("item_id") or "")
+            if not iid: continue
+            grouped.setdefault(iid,[]).append(x)
+        out={}
+        for iid, attempts in grouped.items():
+            attempts=sorted(attempts,key=lambda z:str(z.get("created_at") or ""),reverse=True)
+            latest=attempts[0]
+            latest_created=str(latest.get("created_at") or "")
+            retries=[x for x in attempts if str(x.get("teacher_feedback_status") or "")=="retry" and x.get("reviewed_at")]
+            latest_retry=max((str(x.get("reviewed_at") or "") for x in retries),default="")
+            if latest_retry and latest_retry >= latest_created:
+                state="retry"
+            elif latest_retry and latest_created > latest_retry:
+                state="resubmitted"
+            else:
+                state="read"
+            out[iid]={"state":state,"attempts":len(attempts),"score":latest.get("overall_score"),"created_at":latest_created}
+        return {"success":True,"items":out}
+    except Exception as error:
+        return {"success":False,"error":str(error),"items":{}}
+
 @app.get("/api/student/teacher-feedback")
 def student_teacher_feedback(student_id: str = "", student_name: str = "", day_number: int = 0):
     try:
@@ -828,7 +873,7 @@ def list_task_submissions(task_filter="", limit=100, offset=0, q="", day_number=
         batch=r.json(); all_rows.extend(batch)
         if len(batch)<page: break
         pos += len(batch)
-    reviewed_states={"good","retry","help","sent"}
+    reviewed_states={"draft","good","retry","help","sent"}
     def skey(x): return str(x.get("student_id") or x.get("student_name") or "").strip()
     def ikey(x): return (skey(x),str(x.get("item_id") or ""))
     def ts(x):
@@ -1167,6 +1212,7 @@ button,input{font-family:inherit}.app{max-width:820px;margin:auto;padding:24px 1
 .scores{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:18px}.score-box{padding:15px 5px;border-radius:15px;background:var(--light);text-align:center}
 .score-value{font-size:24px;font-weight:800;color:var(--gd)}.score-name{margin-top:5px;color:var(--mu);font-size:10px}.score-status{margin-top:4px;color:var(--g);font-size:10px;font-weight:700}
 .feedback{margin-top:12px;padding:17px;border-radius:16px;background:var(--cream);line-height:1.55;font-size:14px}
+.learner-progress{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 8px}.progress-chip{border:1px solid var(--bd);background:#fff;border-radius:999px;padding:7px 10px;font-size:12px;font-weight:800;color:var(--mu)}.progress-chip strong{color:var(--gd)}.item-dot.unread{border-style:dashed}.item-dot.read{background:#edf7f1;border-color:#b8d7c5}.item-dot.retry{background:#fff1df;border-color:#e4b46b}.item-dot.resubmitted{background:#eef4ff;border-color:#a9bfe6}.item-state{font-size:12px;font-weight:800;margin:8px 0 2px;color:var(--mu)}.aligned-reading{display:flex;flex-wrap:wrap;justify-content:center;align-items:flex-end;gap:8px 10px;margin:8px auto 4px;max-width:760px}.reading-unit{display:inline-flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:28px}.reading-hanzi{font-size:34px;font-weight:850;line-height:1.12}.reading-pinyin{font-size:14px;color:var(--g);font-weight:750;line-height:1.25;margin-top:3px;white-space:nowrap}.reading-punct{font-size:32px;line-height:1.1;margin-left:-5px}.practice.aligned .hanzi,.practice.aligned .pinyin{display:none}@media(max-width:600px){.reading-hanzi{font-size:30px}.reading-pinyin{font-size:13px}.aligned-reading{gap:7px 8px}}
 .mailbox-bar{margin:12px 0 16px;border:1px solid var(--bd);background:#fff;border-radius:16px;padding:13px 15px;display:flex;align-items:center;gap:12px;cursor:pointer}.mailbox-icon{font-size:24px;position:relative}.mailbox-badge{position:absolute;right:-9px;top:-7px;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--gd);color:#fff;font-size:11px;display:none;align-items:center;justify-content:center}.mailbox-title{font-weight:900;color:var(--gd)}.mailbox-sub{font-size:12px;color:var(--mu);margin-top:2px}.mailbox-arrow{margin-left:auto;font-weight:900;color:var(--g)}.mailbox-panel{display:none;background:#fff;border:1px solid var(--bd);border-radius:16px;padding:14px;margin:-8px 0 18px}.mailbox-panel.open{display:block}.mail-item{padding:11px 2px;border-bottom:1px solid var(--bd)}.mail-item:last-child{border-bottom:0}.mail-meta{font-size:12px;font-weight:900;color:var(--g);margin-bottom:5px}.mail-word{font-size:16px;font-weight:900}.mail-note{font-size:14px;line-height:1.5;margin-top:5px}.mail-action{margin-top:8px;border:0;border-radius:11px;padding:9px 13px;background:var(--gs);color:var(--gd);font-weight:900;cursor:pointer}
 .teacher-feedback-wrap{margin:12px 0 4px;display:none}.teacher-feedback-wrap.show{display:block}
 .teacher-feedback-summary{width:100%;border:1px solid var(--bd);background:#fff;border-radius:14px;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--gd);font-weight:900;cursor:pointer}
@@ -1237,7 +1283,7 @@ let STUDENTS=[];
 studentSelect.addEventListener("change",()=>{
  localStorage.setItem(STUDENT_KEY,studentSelect.value);
  loadMailbox();
- if(currentDayId){renderItemNav();renderCurrentItem();}
+ if(currentDayId){loadLearnerProgress();}
 });
 function escMain(s){const d=document.createElement("div");d.textContent=String(s??"");return d.innerHTML}
 async function loadStudents(){
@@ -1378,6 +1424,7 @@ function openDay(dayId){
   if(!COURSE[dayId])return;
   currentDayId=dayId;currentItemIndex=0;
   renderCalendar();renderLesson();
+  loadLearnerProgress();
   setTimeout(listenSample,300);
 }
 
@@ -1387,9 +1434,11 @@ function renderLesson(){
     <div class="lesson-day">DAY ${l.day}</div>
     <div class="lesson-title">${l.title}</div>
     <div class="lesson-subtitle">${l.subtitle||""}</div>
+    <div class="learner-progress" id="learnerProgress"></div>
     <div class="item-nav" id="itemNav"></div>
-    <div class="practice">
+    <div class="practice" id="practiceBox">
       <div class="focus" id="focus"></div>
+      <div class="aligned-reading" id="alignedReading"></div>
       <div class="hanzi" id="hanzi"></div>
       <div class="pinyin" id="pinyin"></div>
       <div class="meaning" id="meaning"></div>
@@ -1464,14 +1513,54 @@ function currentItem(){
  return x;
 }
 
+let LEARNER_PROGRESS={};
+async function loadLearnerProgress(){
+ LEARNER_PROGRESS={};
+ if(!currentDayId){renderItemNav();return}
+ if(!studentSelect.value){renderLearnerProgress();renderItemNav();renderCurrentItem();return}
+ const st=STUDENTS.find(s=>String(s.id)===String(studentSelect.value));
+ try{
+  const day=COURSE[currentDayId]?.day||0;
+  const r=await fetch(`/api/student/progress?student_id=${encodeURIComponent(studentSelect.value)}&student_name=${encodeURIComponent(st?.student_name||"")}&day_number=${encodeURIComponent(day)}`);
+  const d=await r.json(); if(d.success)LEARNER_PROGRESS=d.items||{};
+ }catch(e){console.warn("Learner progress:",e)}
+ renderLearnerProgress();renderItemNav();renderCurrentItem();
+}
+function learnerState(itemId){return LEARNER_PROGRESS[String(itemId)]?.state||"unread"}
+function renderLearnerProgress(){
+ const box=document.getElementById("learnerProgress");if(!box||!currentDayId)return;
+ const items=COURSE[currentDayId]?.items||[];let unread=0,read=0,retry=0,resub=0;
+ items.forEach(x=>{const s=learnerState(x.id);if(s==="unread")unread++;else if(s==="retry")retry++;else if(s==="resubmitted")resub++;else read++;});
+ box.innerHTML=`<span class="progress-chip">● Chưa đọc <strong>${unread}</strong></span><span class="progress-chip">✓ Đã đọc <strong>${read}</strong></span>${retry?`<span class="progress-chip">↻ Cô nhắc luyện lại <strong>${retry}</strong></span>`:""}${resub?`<span class="progress-chip">✓ Đã gửi lại <strong>${resub}</strong></span>`:""}`;
+}
+function itemStateText(itemId){const s=learnerState(itemId),p=LEARNER_PROGRESS[String(itemId)]||{};if(s==="retry")return "↻ Cô nhắc luyện lại";if(s==="resubmitted")return "✓ Đã gửi lại · Chờ cô xem";if(s==="read")return `✓ Đã đọc${p.attempts>1?` · ${p.attempts} lần`:""}${p.score!==null&&p.score!==undefined?` · ${p.score}/10`:""}`;return "● Chưa đọc"}
+function parseDisplaySegments(x){
+ let raw=x.display_segments||x.segments||x.displaySegments||null;
+ if(raw){try{if(typeof raw==="string")raw=JSON.parse(raw);if(Array.isArray(raw))return raw.map(z=>typeof z==="string"?{hanzi:z,pinyin:""}:z)}catch(_){}}
+ const hz=String(x.hanzi||"").trim(),py=String(x.pinyin||"").trim();
+ if(!hz||!py)return [];
+ // Safe fallback for short/verse material: pair Chinese characters with pinyin syllables; punctuation stays attached visually.
+ const chars=[...hz].filter(c=>!/\s/.test(c));
+ const syll=py.replace(/[，。！？；：,.!?;:]/g," ").split(/\s+/).filter(Boolean);
+ const chinese=chars.filter(c=>/[\u3400-\u9fff]/.test(c));
+ if(chinese.length!==syll.length)return [];
+ let i=0;return chars.map(c=>/[\u3400-\u9fff]/.test(c)?{hanzi:c,pinyin:syll[i++]}:{hanzi:c,pinyin:"",punct:true});
+}
+function renderAlignedReading(x){
+ const box=document.getElementById("alignedReading"),practice=document.getElementById("practiceBox");if(!box||!practice)return;
+ const seg=parseDisplaySegments(x);if(!seg.length){box.innerHTML="";practice.classList.remove("aligned");return}
+ box.innerHTML=seg.map(z=>z.punct?`<span class="reading-punct">${escMain(z.hanzi||z.text||"")}</span>`:`<span class="reading-unit"><span class="reading-hanzi">${escMain(z.hanzi||z.text||"")}</span><span class="reading-pinyin">${escMain(z.pinyin||"")}</span></span>`).join("");practice.classList.add("aligned");
+}
+
 function renderItemNav(){
   const nav=document.getElementById("itemNav");if(!nav)return;
   nav.innerHTML="";const p=getProgress();
   COURSE[currentDayId].items.forEach((x,i)=>{
     const b=document.createElement("button");b.className="item-dot";
     if(i===currentItemIndex)b.classList.add("selected");
+    const state=learnerState(x.id);b.classList.add(state);
     if(p[currentDayId]?.items?.[x.id]?.done)b.classList.add("done");
-    b.innerText=i+1;
+    b.title=itemStateText(x.id);b.innerText=i+1;
     b.onclick=()=>{currentItemIndex=i;renderItemNav();renderCurrentItem();setTimeout(listenSample,220)};
     nav.appendChild(b);
   });
@@ -1479,10 +1568,14 @@ function renderItemNav(){
 
 function renderCurrentItem(){
   const x=currentItem();
+  document.querySelectorAll(".item-state").forEach(n=>n.remove());
   document.getElementById("focus").innerText=x.focus;
   document.getElementById("hanzi").innerText=x.hanzi;
   document.getElementById("pinyin").innerText=x.pinyin;
   document.getElementById("meaning").innerText=x.meaning;
+  renderAlignedReading(x);
+  const state=document.createElement("div");state.className="item-state";state.innerText=itemStateText(x.id);
+  document.getElementById("meaning").insertAdjacentElement("afterend",state);
   document.getElementById("result").style.display="none";
   const nextBtn=document.getElementById("nextButton");
   if(nextBtn){
@@ -1618,6 +1711,9 @@ async function sendAudio(blob,mimeType="audio/webm"){
     }
     if(!r.ok || !d.success)throw new Error(d?.error||"Không chấm được.");
     showResult(d.result);markItemDone(currentDayId,x.id,d.result.overall_score);
+    const prev=LEARNER_PROGRESS[String(x.id)]||{};LEARNER_PROGRESS[String(x.id)]={...prev,state:prev.state==="retry"?"resubmitted":"read",attempts:Number(prev.attempts||0)+1,score:d.result.overall_score,created_at:new Date().toISOString()};
+    renderLearnerProgress();renderItemNav();
+    document.querySelectorAll(".item-state").forEach(n=>n.remove());const stLine=document.createElement("div");stLine.className="item-state";stLine.innerText=itemStateText(x.id);document.getElementById("meaning").insertAdjacentElement("afterend",stLine);
     status.innerText="Đã nhận phản hồi";
   }catch(e){status.innerText="Lỗi: "+e.message}
   finally{
