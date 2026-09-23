@@ -1622,10 +1622,30 @@ function renderCurrentItem(){
   }
 }
 
+function ttsTextForItem(x){
+  if(!x)return "";
+  // Ưu tiên dữ liệu TTS chuyên biệt từ Master nếu Apps Script đã trả field này.
+  const explicit=String(x.tts_text||x.audio_text||x.ttsText||"").trim();
+  if(explicit)return explicit;
+
+  let text=String(x.hanzi||"");
+  const context=[x.focus,x.section,x.meaning,x.meaning_vi,x.teacher_note].filter(Boolean).join(" ").toLowerCase();
+
+  // Chỉ đổi số thành cách đọc từng chữ số trong ngữ cảnh số phòng.
+  // Không ảnh hưởng các số đếm thông thường như 3 đêm, 500 người, tầng 11...
+  const isRoomNumber=/房号|房號|số phòng|so phong/.test(context);
+  if(isRoomNumber){
+    const digitMap={"0":"零","1":"幺","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九"};
+    text=text.replace(/\d{2,}/g, m=>m.split("").map(d=>digitMap[d]||d).join(""));
+  }
+  return text;
+}
+
 function listenSample(){
   const x=currentItem();if(!x)return;
   speechSynthesis.cancel();
-  const u=new SpeechSynthesisUtterance(x.hanzi);u.lang="zh-CN";u.rate=.78;
+  const spoken=ttsTextForItem(x);
+  const u=new SpeechSynthesisUtterance(spoken);u.lang="zh-CN";u.rate=.78;
   const v=speechSynthesis.getVoices().find(v=>v.lang?.toLowerCase().startsWith("zh"));
   if(v)u.voice=v;speechSynthesis.speak(u);
 }
