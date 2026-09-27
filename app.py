@@ -59,7 +59,7 @@ COURSE_CONFIG = {
     "holidays": {
         "2026-08-31": "Nghỉ lễ",
         "2026-09-02": "Nghỉ lễ Quốc khánh",
-        "2026-09-23": "Nghỉ lớp"
+        "2026-09-23": "Nghỉ"
     }
 }
 
@@ -1411,7 +1411,7 @@ function renderCalendar(){
 
     if(info?.holiday){
       cell.classList.add("holiday");
-      html+=`<div class="day-badge">🇻🇳 NGHỈ LỄ</div>`;
+      html+=`<div class="day-badge">🇻🇳 NGHỈ</div>`;
     }else if(info?.day){
       const hasData=!!COURSE[info.dayId];
       const future=ds>todayString();
