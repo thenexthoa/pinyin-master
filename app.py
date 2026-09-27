@@ -58,7 +58,8 @@ COURSE_CONFIG = {
     "study_weekdays": [0, 2],  # Monday=0, Wednesday=2
     "holidays": {
         "2026-08-31": "Nghỉ lễ",
-        "2026-09-02": "Nghỉ lễ Quốc khánh"
+        "2026-09-02": "Nghỉ lễ Quốc khánh",
+        "2026-09-23": "Nghỉ lớp"
     }
 }
 
@@ -1566,15 +1567,75 @@ function renderLearnerProgress(){
 function itemStateText(itemId){const s=learnerState(itemId),p=LEARNER_PROGRESS[String(itemId)]||{};if(s==="retry")return "↻ Cô nhắc luyện lại";if(s==="resubmitted")return "✓ Đã gửi lại · Chờ cô xem";if(s==="read")return `✓ Đã đọc${p.attempts>1?` · ${p.attempts} lần`:""}${p.score!==null&&p.score!==undefined?` · ${p.score}/10`:""}`;return "● Chưa đọc"}
 function parseDisplaySegments(x){
  let raw=x.display_segments||x.segments||x.displaySegments||null;
- if(raw){try{if(typeof raw==="string")raw=JSON.parse(raw);if(Array.isArray(raw))return raw.map(z=>typeof z==="string"?{hanzi:z,pinyin:""}:z)}catch(_){}}
- const hz=String(x.hanzi||"").trim(),py=String(x.pinyin||"").trim();
+ if(raw){
+   try{
+     if(typeof raw==="string")raw=JSON.parse(raw);
+     if(Array.isArray(raw))return raw.map(z=>typeof z==="string"?{hanzi:z,pinyin:""}:z);
+   }catch(_){}
+ }
+
+ const hz=String(x.hanzi||"").trim(), py=String(x.pinyin||"").trim();
  if(!hz||!py)return [];
- // Safe fallback for short/verse material: pair Chinese characters with pinyin syllables; punctuation stays attached visually.
+
+ // Renderer tự ghép theo CỤM TỪ, không ghép cứng từng chữ.
+ // Intl.Segmenter giúp giữ 房号 ↔ fánghào, 多少 ↔ duōshao, 谢谢 ↔ xièxie...
+ try{
+   if(typeof Intl!=="undefined" && Intl.Segmenter){
+     const segger=new Intl.Segmenter("zh-CN",{granularity:"word"});
+     const hparts=[];
+     // Tách mũi tên trước để không làm lệch hai vế câu.
+     hz.split(/(→|->)/).forEach(part=>{
+       if(!part)return;
+       if(/^(→|->)$/.test(part)){hparts.push({hanzi:part,pinyin:"",punct:true});return;}
+       for(const s of segger.segment(part)){
+         const t=String(s.segment||"");
+         if(!t.trim())continue;
+         if(/^[，。！？；：,.!?;:、]+$/.test(t)){hparts.push({hanzi:t,pinyin:"",punct:true});continue;}
+         hparts.push({hanzi:t,pinyin:""});
+       }
+     });
+
+     const pysides=py.split(/(?:→|->)/).map(s=>s.trim());
+     let side=0, pyi=0;
+     let pytokens=(pysides[0]||"").replace(/[，。！？；：,.!?;:、]/g," ").split(/\s+/).filter(Boolean);
+     const out=[];
+
+     for(const hp of hparts){
+       if(hp.punct && /^(→|->)$/.test(hp.hanzi)){
+         out.push(hp); side++; pyi=0;
+         pytokens=(pysides[side]||"").replace(/[，。！？；：,.!?;:、]/g," ").split(/\s+/).filter(Boolean);
+         continue;
+       }
+       if(hp.punct){out.push(hp);continue;}
+
+       const t=hp.hanzi;
+       if(/^\d+$/.test(t)){
+         // Số phòng như 1108 có 4 âm: yāo yāo líng bā.
+         const n=t.length;
+         const pp=pytokens.slice(pyi,pyi+n).join(" ");
+         if(pp){out.push({hanzi:t,pinyin:pp});pyi+=n;continue;}
+       }
+
+       const pp=pytokens[pyi]||"";
+       if(pp){out.push({hanzi:t,pinyin:pp});pyi++;continue;}
+       out.push({hanzi:t,pinyin:""});
+     }
+
+     // Chỉ dùng kết quả tự ghép khi đã tiêu thụ hết Pinyin ở từng vế.
+     // Nếu không chắc chắn, rơi xuống fallback an toàn bên dưới.
+     const usedPinyin=out.filter(z=>z.pinyin).map(z=>z.pinyin).join(" ").replace(/\s+/g," ").trim();
+     const sourcePinyin=py.replace(/(?:→|->)/g," ").replace(/[，。！？；：,.!?;:、]/g," ").replace(/\s+/g," ").trim();
+     if(usedPinyin && usedPinyin.toLowerCase()===sourcePinyin.toLowerCase())return out;
+   }
+ }catch(_){}
+
+ // Fallback cũ: chỉ ghép từng chữ khi số chữ Hán = số âm tiết, tránh ghép sai.
  const chars=[...hz].filter(c=>!/\s/.test(c));
- const syll=py.replace(/[，。！？；：,.!?;:]/g," ").split(/\s+/).filter(Boolean);
+ const syll=py.replace(/(?:→|->)/g," ").replace(/[，。！？；：,.!?;:、]/g," ").split(/\s+/).filter(Boolean);
  const chinese=chars.filter(c=>/[\u3400-\u9fff]/.test(c));
  if(chinese.length!==syll.length)return [];
- let i=0;return chars.map(c=>/[\u3400-\u9fff]/.test(c)?{hanzi:c,pinyin:syll[i++]}:{hanzi:c,pinyin:"",punct:true});
+ let i=0;
+ return chars.map(c=>/[\u3400-\u9fff]/.test(c)?{hanzi:c,pinyin:syll[i++]}:{hanzi:c,pinyin:"",punct:true});
 }
 function renderAlignedReading(x){
  const box=document.getElementById("alignedReading"),practice=document.getElementById("practiceBox");if(!box||!practice)return;
