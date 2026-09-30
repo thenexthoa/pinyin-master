@@ -59,7 +59,7 @@ COURSE_CONFIG = {
     "holidays": {
         "2026-08-31": "Nghỉ lễ",
         "2026-09-02": "Nghỉ lễ Quốc khánh",
-        "2026-09-23": "Nghỉ"
+        "2026-09-23": "Nghỉ lớp"
     }
 }
 
@@ -108,15 +108,32 @@ def fetch_course_from_google_sheet():
         raise RuntimeError("Google Sheet chưa có bài học active.")
     return course
 
-def find_item(day_id, item_id, course=None):
+def find_item(day_id, item_id, course=None, item_hanzi=""):
     course = course or fetch_course_from_google_sheet()
     lesson = course.get(day_id)
     if not lesson:
         return None, None
-    for item in lesson.get("items", []):
-        if str(item.get("id")) == str(item_id):
-            return lesson, item
-    return lesson, None
+    matches = [item for item in lesson.get("items", []) if str(item.get("id")) == str(item_id)]
+    if item_hanzi:
+        for item in matches:
+            if str(item.get("hanzi") or "").strip() == str(item_hanzi).strip():
+                return lesson, item
+    return (lesson, matches[0]) if matches else (lesson, None)
+
+def is_reaction_item(item):
+    marker = " ".join(str(item.get(k) or "") for k in ("activity_type","section","focus","teacher_note")).lower()
+    return (
+        str(item.get("activity_type") or "").lower() in {"reaction","ai_qa","qa"}
+        or "phản xạ" in marker
+        or "việt → trung" in marker
+        or "viet → trung" in marker
+    )
+
+def reaction_question(item):
+    return str(item.get("question_vi") or "").strip() or f"“{str(item.get('meaning') or item.get('meaning_vi') or '').strip()}” nói tiếng Trung là gì?"
+
+def reaction_answer(item):
+    return str(item.get("accepted_answer") or item.get("hanzi") or "").strip()
 
 def sync_submission_to_google_sheet(submission_id, student_id, student_name, lesson, item, result):
     if not GOOGLE_SHEET_WEBAPP_URL:
@@ -304,6 +321,109 @@ Không markdown.
 
     return result
 
+
+def evaluate_reaction(audio_bytes, mime_type, item):
+    accepted = reaction_answer(item)
+    target_pinyin = str(item.get("pinyin") or "").strip()
+    question = reaction_question(item)
+    prompt = f"""
+Bạn là trợ lý nghe tiếng Trung cho Zhou Laoshi.
+Đây là bài PHẢN XẠ Việt → Trung.
+
+Câu hỏi tiếng Việt: {question}
+Đáp án chuẩn: {accepted}
+Pinyin đáp án chuẩn: {target_pinyin}
+
+Hãy nghe AUDIO THỰC TẾ và làm HAI VIỆC TÁCH BIỆT:
+1) Nhận dạng chính xác học viên đã nói gì bằng chữ Hán và Pinyin.
+2) Chấm chất lượng phát âm của CÂU HỌC VIÊN THỰC SỰ NÓI, không giả định họ nói đáp án chuẩn.
+
+Chỉ trả JSON:
+{{
+ "heard_hanzi":"",
+ "heard_pinyin":"",
+ "syllables":[
+   {{"target":"","heard":"","initial_score":0,"final_score":0,"tone_score":0,
+     "initial_status":"","final_status":"","tone_status":"","note":""}}
+ ],
+ "problem_syllable":"",
+ "main_issue":"",
+ "feedback":"",
+ "encouragement":""
+}}
+
+Status chỉ dùng "Tốt", "Khá", "Cần luyện".
+Nếu nghe không rõ, ghi nhận thận trọng, không tự đoán thành đáp án chuẩn.
+Không markdown.
+"""
+    response=None
+    last_error=None
+    for attempt in range(3):
+        try:
+            response=client.models.generate_content(
+                model=MODEL,
+                contents=[prompt, types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)],
+                config=types.GenerateContentConfig(temperature=0.05, response_mime_type="application/json"),
+            )
+            break
+        except Exception as e:
+            last_error=e
+            msg=str(e).lower()
+            if not ("503" in msg or "unavailable" in msg or "high demand" in msg or "429" in msg) or attempt==2:
+                raise
+            time.sleep(1.2*(attempt+1))
+    if response is None:
+        raise last_error or RuntimeError("AI temporarily unavailable")
+
+    raw=extract_json(response.text)
+    clean=[]
+    for syl in (raw.get("syllables") if isinstance(raw.get("syllables"),list) else []):
+        if not isinstance(syl,dict): continue
+        clean.append({
+            "target":str(syl.get("target") or "").strip(),
+            "heard":str(syl.get("heard") or "").strip(),
+            "initial_score":score10(syl.get("initial_score",0)),
+            "final_score":score10(syl.get("final_score",0)),
+            "tone_score":score10(syl.get("tone_score",0)),
+            "initial_status":str(syl.get("initial_status") or "").strip(),
+            "final_status":str(syl.get("final_status") or "").strip(),
+            "tone_status":str(syl.get("tone_status") or "").strip(),
+            "note":str(syl.get("note") or "").strip(),
+        })
+    if clean:
+        n=len(clean)
+        initial=score10(sum(float(x["initial_score"]) for x in clean)/n)
+        final=score10(sum(float(x["final_score"]) for x in clean)/n)
+        tone=score10(sum(float(x["tone_score"]) for x in clean)/n)
+    else:
+        initial=final=tone=0.0
+    overall=score10(initial*.25+final*.30+tone*.45)
+    status_for=lambda v: "Tốt" if float(v or 0)>=8.5 else ("Khá" if float(v or 0)>=6.5 else "Cần luyện")
+
+    heard_hanzi=str(raw.get("heard_hanzi") or "").strip()
+    norm=lambda x: re.sub(r"[\s，。！？、,.!?;；:：'’“”]+", "", str(x or "")).strip()
+    accepted_list=[x.strip() for x in re.split(r"[|｜]",accepted) if x.strip()]
+    answer_correct=bool(heard_hanzi and any(norm(heard_hanzi)==norm(a) for a in accepted_list))
+
+    result={
+        "activity_type":"reaction",
+        "answer_correct":answer_correct,
+        "heard_hanzi":heard_hanzi,
+        "accepted_answer":accepted,
+        "heard_pinyin":str(raw.get("heard_pinyin") or "").strip(),
+        "syllables":clean,
+        "initial_score":initial,"final_score":final,"tone_score":tone,"overall_score":overall,
+        "initial_status":status_for(initial),"final_status":status_for(final),"tone_status":status_for(tone),
+        "problem_syllable":str(raw.get("problem_syllable") or "").strip(),
+        "main_issue":str(raw.get("main_issue") or "").strip(),
+        "feedback":str(raw.get("feedback") or "").strip(),
+        "encouragement":str(raw.get("encouragement") or "").strip(),
+    }
+    if not answer_correct:
+        result["main_issue"]="Chưa đúng đáp án"
+        result["feedback"]=f"Bạn vừa trả lời “{heard_hanzi or 'chưa nhận dạng rõ'}”. Đáp án cần nói là “{accepted}”."
+        result["encouragement"]="Thử trả lời lại câu hỏi bằng tiếng Trung, rồi chú ý phát âm từng âm tiết."
+    return result
 
 def safe_filename_part(value):
     value = str(value or "").strip()
@@ -572,13 +692,14 @@ async def evaluate(
     item_id: str = Form(...),
     student_name: str = Form(""),
     student_id: str = Form(""),
+    item_hanzi: str = Form(""),
 ):
     t_total = time.perf_counter()
     timing = {}
     try:
         t = time.perf_counter()
         course = fetch_course_from_google_sheet()
-        lesson, item = find_item(day_id, item_id, course)
+        lesson, item = find_item(day_id, item_id, course, item_hanzi)
         timing["course_ms"] = round((time.perf_counter() - t) * 1000)
         if not lesson or not item:
             return {"success": False, "error": "Không tìm thấy bài/từ luyện."}
@@ -602,7 +723,10 @@ async def evaluate(
 
         mime_type = audio.content_type or "audio/webm"
         t = time.perf_counter()
-        result = evaluate_pronunciation(audio_bytes, mime_type, item["hanzi"], item["pinyin"], item["focus"])
+        if is_reaction_item(item):
+            result = evaluate_reaction(audio_bytes, mime_type, item)
+        else:
+            result = evaluate_pronunciation(audio_bytes, mime_type, item["hanzi"], item["pinyin"], item["focus"])
         timing["gemini_ms"] = round((time.perf_counter() - t) * 1000)
 
         saved_name = student_name.strip() or "Chưa nhập tên"
@@ -1411,7 +1535,7 @@ function renderCalendar(){
 
     if(info?.holiday){
       cell.classList.add("holiday");
-      html+=`<div class="day-badge">🇻🇳 NGHỈ</div>`;
+      html+=`<div class="day-badge">🇻🇳 NGHỈ LỄ</div>`;
     }else if(info?.day){
       const hasData=!!COURSE[info.dayId];
       const future=ds>todayString();
@@ -1657,14 +1781,27 @@ function renderItemNav(){
   });
 }
 
+function isReactionItem(x){
+  if(!x)return false;
+  const marker=[x.activity_type,x.section,x.focus,x.teacher_note].filter(Boolean).join(" ").toLowerCase();
+  return ["reaction","ai_qa","qa"].includes(String(x.activity_type||"").toLowerCase()) || marker.includes("phản xạ") || marker.includes("việt → trung") || marker.includes("viet → trung");
+}
+function reactionQuestion(x){
+  return String(x.question_vi||"").trim() || `“${String(x.meaning||x.meaning_vi||"").trim()}” nói tiếng Trung là gì?`;
+}
+
 function renderCurrentItem(){
   const x=currentItem();
   document.querySelectorAll(".item-state").forEach(n=>n.remove());
-  document.getElementById("focus").innerText=x.focus;
-  document.getElementById("hanzi").innerText=x.hanzi;
-  document.getElementById("pinyin").innerText=x.pinyin;
-  document.getElementById("meaning").innerText=x.meaning;
-  renderAlignedReading(x);
+  const reaction=isReactionItem(x);
+  document.getElementById("focus").innerText=reaction?"PHẢN XẠ · Việt → Trung":x.focus;
+  document.getElementById("hanzi").innerText=reaction?reactionQuestion(x):x.hanzi;
+  document.getElementById("pinyin").innerText=reaction?"":x.pinyin;
+  document.getElementById("meaning").innerText=reaction?"Nghe/đọc câu hỏi và trả lời bằng tiếng Trung qua micro.":x.meaning;
+  if(reaction){
+    const box=document.getElementById("alignedReading"),practice=document.getElementById("practiceBox");
+    if(box)box.innerHTML=""; if(practice)practice.classList.remove("aligned");
+  }else renderAlignedReading(x);
   const state=document.createElement("div");state.className="item-state";state.innerText=itemStateText(x.id);
   document.getElementById("meaning").insertAdjacentElement("afterend",state);
   document.getElementById("result").style.display="none";
@@ -1679,7 +1816,8 @@ function renderCurrentItem(){
     document.getElementById("status").innerText="🔒 Nội dung luyện này chưa mở.";
   }else{
     rb.disabled=false;
-    document.getElementById("status").innerText="Nghe mẫu rồi thử đọc";
+    document.getElementById("status").innerText=reaction?"Sẵn sàng trả lời bằng tiếng Trung":"Nghe mẫu rồi thử đọc";
+    rb.innerText=reaction?"🎙️ Trả lời":"🎙️ Bắt đầu đọc";
   }
 }
 
@@ -1705,9 +1843,11 @@ function ttsTextForItem(x){
 function listenSample(){
   const x=currentItem();if(!x)return;
   speechSynthesis.cancel();
-  const spoken=ttsTextForItem(x);
-  const u=new SpeechSynthesisUtterance(spoken);u.lang="zh-CN";u.rate=.78;
-  const v=speechSynthesis.getVoices().find(v=>v.lang?.toLowerCase().startsWith("zh"));
+  const reaction=isReactionItem(x);
+  const spoken=reaction?reactionQuestion(x):ttsTextForItem(x);
+  const u=new SpeechSynthesisUtterance(spoken);u.lang=reaction?"vi-VN":"zh-CN";u.rate=reaction?.9:.78;
+  const langPrefix=reaction?"vi":"zh";
+  const v=speechSynthesis.getVoices().find(v=>v.lang?.toLowerCase().startsWith(langPrefix));
   if(v)u.voice=v;speechSynthesis.speak(u);
 }
 
@@ -1811,7 +1951,7 @@ async function sendAudio(blob,mimeType="audio/webm"){
   const st=STUDENTS.find(s=>String(s.id)===String(studentSelect.value));
   const ext=mimeType.includes("ogg")?"ogg":"webm";
   f.append("audio",blob,"recording."+ext);
-  f.append("day_id",currentDayId);f.append("item_id",x.id);
+  f.append("day_id",currentDayId);f.append("item_id",x.id);f.append("item_hanzi",x.hanzi||"");
   f.append("student_id",studentSelect.value);f.append("student_name",st?st.student_name:"");
   try{
     const r=await fetch("/api/evaluate",{method:"POST",body:f});
@@ -1829,7 +1969,7 @@ async function sendAudio(blob,mimeType="audio/webm"){
   }catch(e){status.innerText="Lỗi: "+e.message}
   finally{
     sending=false;b.disabled=false;
-    b.innerText="🎙️ Bắt đầu đọc";b.classList.remove("recording");
+    b.innerText=isReactionItem(currentItem())?"🎙️ Trả lời":"🎙️ Bắt đầu đọc";b.classList.remove("recording");
   }
 }
 
@@ -1843,6 +1983,9 @@ function showResult(r){
   const noIssue=["","không có","khong co","none","n/a","null","no issue","không"].includes(rawIssue.toLowerCase());
 
   document.getElementById("result").style.display="block";
+  if(r.activity_type==="reaction"){
+    level=r.answer_correct?"✓ Đúng đáp án · "+level:"✕ Chưa đúng đáp án";
+  }
   document.getElementById("overallScore").innerText=r.overall_score;
   document.getElementById("heardPinyin").innerText=r.heard_pinyin||"—";
   document.getElementById("initialScore").innerText=r.initial_score;
