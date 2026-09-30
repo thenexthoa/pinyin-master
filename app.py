@@ -1786,6 +1786,15 @@ function isReactionItem(x){
   const marker=[x.activity_type,x.section,x.focus,x.teacher_note].filter(Boolean).join(" ").toLowerCase();
   return ["reaction","ai_qa","qa"].includes(String(x.activity_type||"").toLowerCase()) || marker.includes("phản xạ") || marker.includes("việt → trung") || marker.includes("viet → trung");
 }
+function isQuestionAnswerItem(x){
+  if(!x)return false;
+  const marker=[x.activity_type,x.section,x.focus,x.teacher_note].filter(Boolean).join(" ").toLowerCase();
+  return isReactionItem(x)
+    || ["question_answer","question-answer","q&a"].includes(String(x.activity_type||"").toLowerCase())
+    || marker.includes("hỏi → đáp")
+    || marker.includes("hỏi đáp")
+    || marker.includes("hai câu đối ứng");
+}
 function reactionQuestion(x){
   return String(x.question_vi||"").trim() || `“${String(x.meaning||x.meaning_vi||"").trim()}” nói tiếng Trung là gì?`;
 }
@@ -1794,6 +1803,9 @@ function renderCurrentItem(){
   const x=currentItem();
   document.querySelectorAll(".item-state").forEach(n=>n.remove());
   const reaction=isReactionItem(x);
+  const hideSample=isQuestionAnswerItem(x);
+  const listenBtn=document.getElementById("listenBtn");
+  if(listenBtn) listenBtn.style.display=hideSample?"none":"";
   document.getElementById("focus").innerText=reaction?"PHẢN XẠ · Việt → Trung":x.focus;
   document.getElementById("hanzi").innerText=reaction?reactionQuestion(x):x.hanzi;
   document.getElementById("pinyin").innerText=reaction?"":x.pinyin;
