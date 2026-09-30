@@ -59,7 +59,8 @@ COURSE_CONFIG = {
     "holidays": {
         "2026-08-31": "Nghỉ lễ",
         "2026-09-02": "Nghỉ lễ Quốc khánh",
-        "2026-09-23": "Nghỉ lớp"
+        "2026-09-23": "Nghỉ lớp",
+        "2026-09-30": "Nghỉ lớp"
     }
 }
 
@@ -1580,7 +1581,7 @@ function openDay(dayId){
   currentDayId=dayId;currentItemIndex=0;
   renderCalendar();renderLesson();
   loadLearnerProgress();
-  setTimeout(listenSample,300);
+  setTimeout(()=>{if(!isQuestionAnswerItem(currentItem()))listenSample();},300);
 }
 
 function renderLesson(){
@@ -1776,7 +1777,7 @@ function renderItemNav(){
     const state=learnerState(x.id);b.classList.add(state);
     if(p[currentDayId]?.items?.[x.id]?.done)b.classList.add("done");
     b.title=itemStateText(x.id);b.innerText=i+1;
-    b.onclick=()=>{currentItemIndex=i;renderItemNav();renderCurrentItem();setTimeout(listenSample,220)};
+    b.onclick=()=>{currentItemIndex=i;renderItemNav();renderCurrentItem();setTimeout(()=>{if(!isQuestionAnswerItem(currentItem()))listenSample();},220)};
     nav.appendChild(b);
   });
 }
@@ -1855,6 +1856,7 @@ function ttsTextForItem(x){
 function listenSample(){
   const x=currentItem();if(!x)return;
   speechSynthesis.cancel();
+  if(isQuestionAnswerItem(x)) return;
   const reaction=isReactionItem(x);
   const spoken=reaction?reactionQuestion(x):ttsTextForItem(x);
   const u=new SpeechSynthesisUtterance(spoken);u.lang=reaction?"vi-VN":"zh-CN";u.rate=reaction?.9:.78;
@@ -2023,7 +2025,7 @@ function nextItem(){
     currentItemIndex++;
     renderItemNav();
     renderCurrentItem();
-    setTimeout(listenSample,250);
+    setTimeout(()=>{if(!isQuestionAnswerItem(currentItem()))listenSample();},250);
   }else{
     const card=document.getElementById("lessonCard");
     card.innerHTML=`
