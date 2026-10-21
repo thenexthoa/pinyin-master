@@ -11,6 +11,7 @@ import uuid
 import requests
 import csv
 import io
+import threading
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
@@ -68,6 +69,12 @@ COURSE_CONFIG = {
 # Google Sheet "Bài học cần luyện" là nguồn dữ liệu duy nhất.
 COURSE_DATA = {}
 
+# Learner-speed optimization: keep the live Google Sheet result briefly in memory.
+# This avoids making every learner wait for Apps Script while still keeping edits fresh.
+COURSE_CACHE_TTL = 60
+_COURSE_CACHE = {"course": None, "fetched_at": 0.0}
+_COURSE_CACHE_LOCK = threading.Lock()
+
 
 def extract_json(text):
     if not text:
@@ -90,24 +97,47 @@ def score10(value):
     except Exception:
         return 0.0
 
-def fetch_course_from_google_sheet():
+def fetch_course_from_google_sheet(force_refresh=False):
     if not GOOGLE_SHEET_WEBAPP_URL:
         raise RuntimeError("Chưa có GOOGLE_SHEET_WEBAPP_URL trong .env")
-    r = requests.get(
-        GOOGLE_SHEET_WEBAPP_URL,
-        params={"action":"course", "_ts": str(int(time.time() * 1000))},
-        headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
-        timeout=30,
-    )
-    if not r.ok:
-        raise RuntimeError(f"Không đọc được Google Sheet: {r.status_code} {r.text}")
-    data = r.json()
-    if not data.get("success"):
-        raise RuntimeError(data.get("error") or "Google Sheet không trả dữ liệu hợp lệ.")
-    course = data.get("course") or {}
-    if not course:
-        raise RuntimeError("Google Sheet chưa có bài học active.")
-    return course
+
+    now = time.monotonic()
+    cached = _COURSE_CACHE.get("course")
+    fetched_at = float(_COURSE_CACHE.get("fetched_at") or 0.0)
+    if not force_refresh and cached and (now - fetched_at) < COURSE_CACHE_TTL:
+        return cached
+
+    # Only one request per Render process refreshes Apps Script at a time.
+    with _COURSE_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _COURSE_CACHE.get("course")
+        fetched_at = float(_COURSE_CACHE.get("fetched_at") or 0.0)
+        if not force_refresh and cached and (now - fetched_at) < COURSE_CACHE_TTL:
+            return cached
+        try:
+            r = requests.get(
+                GOOGLE_SHEET_WEBAPP_URL,
+                params={"action":"course", "_ts": str(int(time.time() * 1000))},
+                headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+                timeout=30,
+            )
+            if not r.ok:
+                raise RuntimeError(f"Không đọc được Google Sheet: {r.status_code} {r.text}")
+            data = r.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error") or "Google Sheet không trả dữ liệu hợp lệ.")
+            course = data.get("course") or {}
+            if not course:
+                raise RuntimeError("Google Sheet chưa có bài học active.")
+            _COURSE_CACHE["course"] = course
+            _COURSE_CACHE["fetched_at"] = time.monotonic()
+            return course
+        except Exception:
+            # If Google/Apps Script has a temporary hiccup, keep the learner app usable
+            # with the most recently successful course data from this Render process.
+            if cached:
+                return cached
+            raise
 
 def find_item(day_id, item_id, course=None, item_hanzi=""):
     course = course or fetch_course_from_google_sheet()
@@ -2048,10 +2078,13 @@ function finishDay(){
 }
 
 async function init(){
-  const d=await(await fetch("/api/course?_ts="+Date.now(), {cache:"no-store"})).json();
+  // Course (Google Sheet) and student list (Supabase) are independent,
+  // so load them in parallel instead of making the learner wait twice.
+  const coursePromise=fetch("/api/course?_ts="+Date.now(), {cache:"no-store"}).then(r=>r.json());
+  const studentsPromise=loadStudents();
+  const [d]=await Promise.all([coursePromise,studentsPromise]);
   if(!d.success)throw new Error("Không tải được dữ liệu.");
   COURSE=d.course;CONFIG=d.config;
-  await loadStudents();
   const start=new Date(CONFIG.start_date+"T00:00:00");
   viewDate=new Date();
   if(viewDate<start)viewDate=new Date(start);
