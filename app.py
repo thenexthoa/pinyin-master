@@ -61,8 +61,11 @@ COURSE_CONFIG = {
         "2026-08-31": "Nghỉ lễ",
         "2026-09-02": "Nghỉ lễ Quốc khánh",
         "2026-09-23": "Nghỉ lớp",
-        "2026-09-30": "Nghỉ lớp"
+        "2026-09-30": "Nghỉ lớp",
         "2026-10-21": "Nghỉ lớp"
+    },
+    "special_dates": {
+        "2026-10-19": "ÔN TẬP"
     }
 }
 
@@ -1530,7 +1533,7 @@ function markItemDone(dayId,itemId,score){
 }
 
 /* Build fixed Mon/Wed schedule from 19/08/2026.
-   31/08 and 02/09 are holidays and DO NOT consume Day numbers. */
+   Holidays and special review dates DO NOT consume Day numbers. */
 function buildSchedule(maxDay=80){
   const map={};
   let d=new Date(CONFIG.start_date+"T00:00:00"), n=1, guard=0;
@@ -1539,6 +1542,8 @@ function buildSchedule(maxDay=80){
     const mondayBased=(d.getDay()+6)%7; // Mon=0 ... Sun=6
     if(CONFIG.holidays?.[ds]){
       map[ds]={holiday:true,label:CONFIG.holidays[ds]};
+    }else if(CONFIG.special_dates?.[ds]){
+      map[ds]={special:true,label:CONFIG.special_dates[ds]};
     }else if(CONFIG.study_weekdays.includes(mondayBased)){
       map[ds]={day:n,dayId:"day"+n}; n++;
     }
@@ -1567,7 +1572,10 @@ function renderCalendar(){
 
     if(info?.holiday){
       cell.classList.add("holiday");
-      html+=`<div class="day-badge">🇻🇳 NGHỈ </div>`;
+      html+=`<div class="day-badge">NGHỈ · ${escMain(info.label||"Nghỉ lớp")}</div>`;
+    }else if(info?.special){
+      cell.classList.add("lesson");
+      html+=`<div class="day-badge">${escMain(info.label||"ÔN TẬP")}</div>`;
     }else if(info?.day){
       const hasData=!!COURSE[info.dayId];
       const future=ds>todayString();
